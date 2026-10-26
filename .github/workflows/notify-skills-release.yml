@@ -27,6 +27,8 @@ jobs:
             exit 0
           fi
 
+          # event_type 是 skills 仓库订阅的 dispatch 契约名，沿用 `sandbox-cli-release`（改名会静默断订阅）；
+          # 工具区分靠 client_payload.tool，本仓库固定 aiod-cli。
           payload="$(jq -cn \
             --arg source_repo 'otaku-say/aiod-cli' \
             --arg source_sha "$SOURCE_SHA" \

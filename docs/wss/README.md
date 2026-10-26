@@ -56,7 +56,7 @@ zig build-exe tls13.zig -O ReleaseFast -femit-bin=tls13_poc
   自动走 wss://。
 - 已实测：沙箱内 openssl s_server（自签证书，SAN 匹配 / 不匹配 / 加 -k 三组）；
   沙箱 → wss → 真实 Cloudflare 反代 → 沙箱网关（pty 附着 + 命令执行 + 副作用核验）；
-  aarch64-linux-musl 交叉编译通过。
+  arm64/linux（musl 静态）交叉编译通过。
 
 ## 同目录附带
 - `probe.py`：用 Python 独立构造 ClientHello 逐项探测扩展（定位扩展编码 bug 用）
