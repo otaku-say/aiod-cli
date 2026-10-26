@@ -16,7 +16,9 @@ pub fn codeRun(self: *Sdk, spec: CodeRunSpec) ![]const u8 {
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, spec.code.len * 2 + 1024));
     try w.writeAll("{\"code\":\"");
     try sdkmod.esc(&w, spec.code);
-    try w.print("\",\"language\":\"{s}\"", .{spec.language orelse "python"});
+    try w.writeAll("\",\"language\":\"");
+    try sdkmod.esc(&w, spec.language orelse "python");
+    try w.writeAll("\"");
     if (spec.session_id) |s| {
         try w.writeAll(",\"session_id\":\"");
         try sdkmod.esc(&w, s);

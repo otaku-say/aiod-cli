@@ -293,8 +293,12 @@ pub const Conn = struct {
                 std.debug.print("[tls] 服务端 alert：desc={d}（fatal）\n", .{ if (payload_len >= 2) out[1] else 0 });
                 return error.RemoteAlert;
             }
-            if (real_type == RecType.handshake and (out[0] == 4 or out[0] == 24)) {
-                dg("[tls] （跳过 post-handshake 消息 type={d}, {d} B）\n", .{ out[0], payload_len });
+            if (real_type == RecType.handshake and out[0] == 24) {
+                std.debug.print("[tls] 服务端请求 KeyUpdate（rekey），本实现不支持，连接即将失效\n", .{});
+                return error.KeyUpdateUnsupported;
+            }
+            if (real_type == RecType.handshake and out[0] == 4) {
+                dg("[tls] （跳过 post-handshake NewSessionTicket, {d} B）\n", .{payload_len});
                 continue;
             }
             return payload_len;

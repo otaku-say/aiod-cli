@@ -117,6 +117,16 @@ pub fn trimSlash(s: []const u8) []const u8 {
     return s[0..e];
 }
 
+/// 会话 ID 会拼进 URL 路径；只放安全字符，避免建成功后处处 404。
+pub fn validId(id: []const u8) bool {
+    if (id.len == 0) return false;
+    for (id) |c| {
+        if (!((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or c == '.' or c == '_' or c == '-')) return false;
+    }
+    return true;
+}
+
 // ---------------- 响应解析辅助（工具层组织结果文本用） ----------------
 
 /// 解析响应体；失败返回 null（非 JSON 响应属正常情况）。

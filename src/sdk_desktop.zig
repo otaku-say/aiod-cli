@@ -276,7 +276,9 @@ pub const RecordSpec = struct {
 /// POST /v2/computer/record
 pub fn record(self: *Sdk, spec: RecordSpec) ![]const u8 {
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, 4096));
-    try w.print("{{\"action\":\"{s}\"", .{spec.action orelse "start"});
+    try w.writeAll("{\"action\":\"");
+    try sdkmod.esc(&w, spec.action orelse "start");
+    try w.writeAll("\"");
     if (spec.fps) |v| try w.print(",\"fps\":{d}", .{v});
     if (spec.crf) |v| try w.print(",\"crf\":{d}", .{v});
     if (spec.max_duration) |v| try w.print(",\"max_duration\":{d}", .{v});

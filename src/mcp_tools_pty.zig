@@ -23,6 +23,7 @@ fn tPtyNew(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
         .no_change_timeout = a.intOpt(srv.arena, "no_change_timeout") catch return srv.argError(a),
     }) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err("参数错误：session_id 只能包含字母、数字、. _ -"),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));

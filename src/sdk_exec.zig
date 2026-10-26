@@ -126,6 +126,7 @@ pub fn stdin(self: *Sdk, command_id: []const u8, text: []const u8, enter: bool) 
 
 /// POST /v2/commands/sessions
 pub fn sessionCreate(self: *Sdk, id: []const u8, cwd: ?[]const u8, user: ?[]const u8, env_json: ?[]const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const cwd_len: usize = if (cwd) |c| c.len else 0;
     const user_len: usize = if (user) |u| u.len else 0;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, (id.len + cwd_len + user_len) * 2 + 1024));

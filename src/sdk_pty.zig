@@ -18,6 +18,7 @@ pub const NewSpec = struct {
 
 /// POST /v2/pty/sessions
 pub fn create(self: *Sdk, spec: NewSpec) ![]const u8 {
+    if (!sdkmod.validId(spec.id)) return error.BadId;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, 16 << 10));
     try w.writeAll("{\"id\":\"");
     try sdkmod.esc(&w, spec.id);

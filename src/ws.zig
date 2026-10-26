@@ -20,7 +20,7 @@ pub const OP_CLOSE: u8 = 0x8;
 pub const OP_PING: u8 = 0x9;
 pub const OP_PONG: u8 = 0xA;
 
-pub const max_frame: usize = 32 << 20;
+pub const max_frame: usize = 64 << 10; // 读缓冲 rbuf 仅 64 KiB；单帧 payload 实际上限还要减帧头。
 const ws_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 // ---------------- 传输层：plain socket / TLS ----------------
@@ -79,6 +79,8 @@ pub const DialOptions = struct {
     insecure: bool = false,
     /// 显式 SNI / 证书校验名（默认 = host）
     sni: ?[]const u8 = null,
+    /// 额外握手请求头，形如 "X-API-KEY: xxx\r\n"（可空）
+    extra_headers: ?[]const u8 = null,
 };
 
 pub const Conn = struct {
@@ -267,6 +269,7 @@ pub fn dial(
             return e;
         };
         std.debug.print("[ws] TLS 握手完成（{s}:{d}, insecure={}）\n", .{ host, port, opts.insecure });
+        std.debug.print("[ws] 警告：wss 仅校验证书主机名，不验证 CA 证书链（自签证书也可连接，存在中间人风险）\n", .{});
     }
 
     const tport: Transport = if (tls_conn) |t| .{ .tls = t } else .{ .plain = stream };
@@ -277,12 +280,13 @@ pub fn dial(
     var key_buf: [32]u8 = undefined;
     const key_b64 = std.base64.standard.Encoder.encode(&key_buf, &key_raw);
 
-    var req_buf: [1024]u8 = undefined;
-    const req = try std.fmt.bufPrint(
-        &req_buf,
-        "GET {s} HTTP/1.1\r\nHost: {s}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n\r\n",
-        .{ path, host_header, key_b64 },
+    // 额外头（如 X-API-KEY）由调用方以 "Name: value\r\n" 形式提供。
+    const req = try std.fmt.allocPrint(
+        std.heap.smp_allocator,
+        "GET {s} HTTP/1.1\r\nHost: {s}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n{s}\r\n",
+        .{ path, host_header, key_b64, opts.extra_headers orelse "" },
     );
+    defer std.heap.smp_allocator.free(req);
 
     try tport.writeAll(req);
 
@@ -301,7 +305,10 @@ pub fn dial(
     }
     if (hdr_end == 0) return error.HandshakeFailed;
     const head = resp[0..hdr_end];
-    if (std.mem.indexOf(u8, head, " 101 ") == null) return error.HandshakeFailed;
+    if (std.mem.indexOf(u8, head, " 101 ") == null) {
+        std.debug.print("[ws] 握手失败，响应头前 200 字节：\n{s}\n", .{head[0..@min(head.len, 200)]});
+        return error.HandshakeFailed;
+    }
 
     // 校验 Sec-WebSocket-Accept
     var sha: [20]u8 = undefined;

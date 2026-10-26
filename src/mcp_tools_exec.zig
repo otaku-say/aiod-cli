@@ -94,12 +94,14 @@ fn tExecAsync(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
 fn tExecLogs(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const cid = a.str(srv.arena, "command_id") catch return srv.argError(a);
     const wait = (a.boolOpt(srv.arena, "wait") catch return srv.argError(a)) orelse false;
+    var wait_timeout = a.intOpt(srv.arena, "wait_timeout") catch return srv.argError(a);
+    if (wait and wait_timeout == null) wait_timeout = 30; // 防止 wait 把 MCP server 无限卡死
     const body = sdk_exec.logs(srv.sdk, .{
         .command_id = cid,
         .offset = a.intOpt(srv.arena, "offset") catch return srv.argError(a),
         .stderr_offset = a.intOpt(srv.arena, "stderr_offset") catch return srv.argError(a),
         .wait = wait,
-        .wait_timeout = a.intOpt(srv.arena, "wait_timeout") catch return srv.argError(a),
+        .wait_timeout = wait_timeout,
     }) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
         else => ToolResult.err(@errorName(e)),
@@ -135,6 +137,7 @@ fn tSessionCreate(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const env_json = a.objJsonText(srv.arena, "env") catch return srv.argError(a);
     const body = sdk_exec.sessionCreate(srv.sdk, sid, try a.strOpt(srv.arena, "cwd"), try a.strOpt(srv.arena, "user"), env_json) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err("参数错误：session_id 只能包含字母、数字、. _ -"),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));

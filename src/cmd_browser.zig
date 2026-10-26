@@ -107,6 +107,9 @@ fn cmdShot(c: *Ctx, a: util.Args) !void {
     if (!res.ok()) return fail(c, res);
     // 校验 PNG 魔术数（避免把错误页写盘）
     const is_png = res.body.len >= 8 and std.mem.eql(u8, res.body[0..8], "\x89PNG\r\n\x1a\n");
+    // httpc 读满调用方缓冲就停且不告知；读满即可能已截断。
+    const truncated = res.body.len >= buf.len;
+    if (truncated) std.debug.print("警告：截图响应达到 {d} MiB 读取上限，写盘的图片可能已截断\n", .{BUF >> 20});
     const dir = std.Io.Dir.cwd();
     const f = try dir.createFile(c.io, out_path, .{});
     defer f.close(c.io);
@@ -114,7 +117,8 @@ fn cmdShot(c: *Ctx, a: util.Args) !void {
     var w = f.writer(c.io, &wbuf);
     try w.interface.writeAll(res.body);
     try w.interface.flush();
-    try c.out.print("saved {d} bytes -> {s}{s}\n", .{ res.body.len, out_path, if (is_png) " (PNG ✓)" else " (⚠ 非 PNG)" });
+    const tag: []const u8 = if (!is_png) " (⚠ 非 PNG)" else if (truncated) " (PNG，可能已截断)" else " (PNG ✓)";
+    try c.out.print("saved {d} bytes -> {s}{s}\n", .{ res.body.len, out_path, tag });
 }
 
 /// br-eval <表达式> [--await]

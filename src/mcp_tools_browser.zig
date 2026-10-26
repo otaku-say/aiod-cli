@@ -199,18 +199,17 @@ fn tBrowserNetwork(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
 }
 
 fn tBrowserConfig(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
-    var body_res: []const u8 = "";
-    if (try a.strOpt(srv.arena, "resolution")) |v| {
+    const payload: ?[]const u8 = if (try a.strOpt(srv.arena, "resolution")) |v| blk: {
         const xi = std.mem.indexOfScalar(u8, v, 'x') orelse
             std.mem.indexOfScalar(u8, v, 'X') orelse return ToolResult.err("参数错误：分辨率格式需为 WxH（如 1280x800）");
-        const payload = try std.fmt.allocPrint(srv.arena, "{{\"resolution\":{{\"width\":{s},\"height\":{s}}}}}", .{ v[0..xi], v[xi + 1 ..] });
-        body_res = try sdk_browser.configSet(srv.sdk, payload);
-    } else if (a.jsonOpt("json")) |j| {
-        const payload = try argmod.Args.jsonText(srv.arena, j);
-        body_res = try sdk_browser.configSet(srv.sdk, payload);
-    } else {
-        body_res = try sdk_browser.configGet(srv.sdk);
-    }
+        const wpx = std.fmt.parseInt(i64, v[0..xi], 10) catch return ToolResult.err("参数错误：分辨率格式需为 WxH（如 1280x800）");
+        const hpx = std.fmt.parseInt(i64, v[xi + 1 ..], 10) catch return ToolResult.err("参数错误：分辨率格式需为 WxH（如 1280x800）");
+        break :blk try std.fmt.allocPrint(srv.arena, "{{\"resolution\":{{\"width\":{d},\"height\":{d}}}}}", .{ wpx, hpx });
+    } else if (a.jsonOpt("json")) |j| try argmod.Args.jsonText(srv.arena, j) else null;
+    const body_res = (if (payload) |p| sdk_browser.configSet(srv.sdk, p) else sdk_browser.configGet(srv.sdk)) catch |e| return switch (e) {
+        error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        else => ToolResult.err(@errorName(e)),
+    };
     return ToolResult.ok(types.clampText(srv.arena, body_res));
 }
 

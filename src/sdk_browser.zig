@@ -66,7 +66,7 @@ pub fn evaluate(self: *Sdk, expression: []const u8, is_await: bool) ![]const u8 
     try w.writeAll("{\"expression\":\"");
     try sdkmod.esc(&w, expression);
     try w.writeAll("\"");
-    if (is_await) try w.writeAll(",\"await\":true");
+    if (is_await) try w.writeAll(",\"await_promise\":true");
     try w.writeAll("}");
 
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
@@ -156,10 +156,15 @@ pub fn tabs(self: *Sdk) ![]const u8 {
 
 /// POST /v2/browser/tabs
 pub fn tabNew(self: *Sdk, url: ?[]const u8) ![]const u8 {
-    const body: []const u8 = if (url) |u|
-        try std.fmt.allocPrint(self.arena, "{{\"url\":\"{s}\"}}", .{try sdkmod.qenc(self.arena, u)})
-    else
-        "{}";
+    var w = std.Io.Writer.fixed(try self.arena.alloc(u8, (if (url) |u| u.len else 0) * 2 + 32));
+    try w.writeAll("{");
+    if (url) |u| {
+        try w.writeAll("\"url\":\"");
+        try sdkmod.esc(&w, u);
+        try w.writeAll("\"");
+    }
+    try w.writeAll("}");
+    const body: []const u8 = w.buffered();
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.POST, "/v2/browser/tabs", body, buf);
     return self.arena.dupe(u8, res.body);
