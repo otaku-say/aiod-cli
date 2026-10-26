@@ -29,11 +29,6 @@ fn toSdk(c: *Ctx) sdkmod.Sdk {
     };
 }
 
-fn fail(c: *Ctx, res: httpc.Response) !void {
-    try c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body });
-    return error.HttpError;
-}
-
 fn auth(c: *Ctx) !httpc.Headers {
     const hs = try c.arena.alloc(std.http.Header, 2);
     var n: usize = 0;
@@ -63,14 +58,14 @@ fn jsonAuth(c: *Ctx) !httpc.Headers {
 fn getJ(c: *Ctx, path: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try c.out.print("{s}\n", .{res.body});
 }
 
 fn postJ(c: *Ctx, path: []const u8, body: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.postJson(c.client, try c.url(path), try jsonAuth(c), body, buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try c.out.print("{s}\n", .{res.body});
 }
 
@@ -85,9 +80,9 @@ fn cmdCode(c: *Ctx, a: util.Args) !void {
     if (src.len == 0) return error.MissingArg;
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 256 << 10));
     try w.print("{{\"code\":\"{s}\"", .{try util.jsonEscape(c.arena, src)});
-    try w.print(",\"language\":\"{s}\"", .{a.get("lang") orelse "python"});
+    try w.print(",\"language\":\"{s}\"", .{try util.jsonEscape(c.arena, a.get("lang") orelse "python")});
     if (a.get("session")) |s| try w.print(",\"session_id\":\"{s}\"", .{try util.jsonEscape(c.arena, s)});
-    if (a.get("timeout")) |t| try w.print(",\"timeout\":{s}", .{t});
+    if (try util.intFlag(c, a, "timeout")) |t| try w.print(",\"timeout\":{d}", .{t});
     try w.print("}}", .{});
     try postJ(c, "/v2/code/execute", w.buffered());
 }
@@ -97,7 +92,7 @@ fn cmdCodeSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
     if (std.mem.eql(u8, cmd, "code-info")) {
         var sdk = toSdk(c);
         const body = sdk_misc.codeInfo(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -109,20 +104,20 @@ fn cmdCodeSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
     }
     if (std.mem.eql(u8, cmd, "code-sess-get")) {
         const id = a.at(0) orelse return error.MissingArg;
-        try getJ(c, try std.fmt.allocPrint(c.arena, "/v2/code/sessions/{s}", .{id}));
+        try getJ(c, try std.fmt.allocPrint(c.arena, "/v2/code/sessions/{s}", .{try util.urlEncode(c.arena, id)}));
         return;
     }
     if (std.mem.eql(u8, cmd, "code-sess-new")) {
-        const body = try std.fmt.allocPrint(c.arena, "{{\"language\":\"{s}\"}}", .{a.get("lang") orelse "python"});
+        const body = try std.fmt.allocPrint(c.arena, "{{\"language\":\"{s}\"}}", .{try util.jsonEscape(c.arena, a.get("lang") orelse "python")});
         try postJ(c, "/v2/code/sessions", body);
         return;
     }
     if (std.mem.eql(u8, cmd, "code-sess-rm")) {
         const id = a.at(0) orelse return error.MissingArg;
-        const path = try std.fmt.allocPrint(c.arena, "/v2/code/sessions/{s}", .{id});
+        const path = try std.fmt.allocPrint(c.arena, "/v2/code/sessions/{s}", .{try util.urlEncode(c.arena, id)});
         const buf = try c.arena.alloc(u8, BUF);
         const res = try httpc.del(c.client, try c.url(path), try auth(c), buf);
-        if (!res.ok()) return fail(c, res);
+        try util.checkResp(c, res);
         try c.out.print("{s}\n", .{res.body});
     }
 }
@@ -148,7 +143,7 @@ fn cmdWatch(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 16 << 10));
         try w.print("{{\"path\":\"{s}\"", .{try util.jsonEscape(c.arena, path)});
         if (a.has("recursive")) try w.print(",\"recursive\":true", .{});
-        if (a.get("debounce")) |d| try w.print(",\"debounce\":{s}", .{d});
+        if (try util.intFlag(c, a, "debounce")) |d| try w.print(",\"debounce\":{d}", .{d});
         if (a.get("exclude")) |v| try writeStrArray(&w, c, "exclude", v);
         if (a.get("include")) |v| try writeStrArray(&w, c, "include_patterns", v);
         try w.print("}}", .{});
@@ -160,12 +155,17 @@ fn cmdWatch(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         // 正确路由是 GET /v2/watch/<id>/poll（/watch/<id> 实测 405）；
         // 支持 --cursor= / --limit= / --timeout=（服务端长轮询）。
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 512));
-        try w.print("/v2/watch/{s}/poll", .{id});
+        try w.print("/v2/watch/{s}/poll", .{try util.urlEncode(c.arena, id)});
         const keys = [_][]const u8{ "cursor", "limit", "timeout" };
         var first = true;
         for (keys) |k| {
-            if (a.get(k)) |v| {
-                try w.print("{s}{s}={s}", .{ if (first) "?" else "&", k, v });
+            if (std.mem.eql(u8, k, "cursor")) {
+                if (a.get(k)) |cur| {
+                    try w.print("{s}{s}={s}", .{ if (first) "?" else "&", k, try util.urlEncode(c.arena, cur) });
+                    first = false;
+                }
+            } else if (try util.intFlag(c, a, k)) |num| {
+                try w.print("{s}{s}={d}", .{ if (first) "?" else "&", k, num });
                 first = false;
             }
         }
@@ -175,7 +175,7 @@ fn cmdWatch(c: *Ctx, cmd: []const u8, a: util.Args) !void {
     if (std.mem.eql(u8, cmd, "watch-rm")) {
         var sdk = toSdk(c);
         const body = sdk_misc.watchRm(&sdk, id) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -203,7 +203,7 @@ fn cmdWatchEvents(c: *Ctx, a: util.Args) !void {
     var max: usize = 0;
     if (a.get("max")) |m| max = std.fmt.parseInt(usize, m, 10) catch 0;
     const json = a.has("json");
-    const path = try std.fmt.allocPrint(c.arena, "/v2/watch/{s}/events", .{id});
+    const path = try std.fmt.allocPrint(c.arena, "/v2/watch/{s}/events", .{try util.urlEncode(c.arena, id)});
 
     const hs = try c.arena.alloc(std.http.Header, 2);
     var n: usize = 0;
@@ -248,7 +248,7 @@ fn cmdMcp(c: *Ctx, a: util.Args) !void {
         try c.out.print("{s}\n", .{if (res.body.len > 0) res.body else "（202 Accepted，无响应内容）"});
         return;
     }
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     // 解析 JSON-RPC error
     const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch {
         try c.out.print("{s}\n", .{res.body});
@@ -286,7 +286,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "watch-ls")) {
         var sdk = toSdk(c);
         const body = sdk_misc.watchLs(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -303,14 +303,14 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "sandbox-info")) {
         var sdk = toSdk(c);
         const body = sdk_misc.sandboxInfo(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
         return true;
     }
     if (eq(cmd, "sandbox-packages")) {
-        const path = try std.fmt.allocPrint(c.arena, "/v2/sandbox/packages?lang={s}", .{a.get("lang") orelse "python"});
+        const path = try std.fmt.allocPrint(c.arena, "/v2/sandbox/packages?lang={s}", .{try util.urlEncode(c.arena, a.get("lang") orelse "python")});
         try getJ(c, path);
         return true;
     }

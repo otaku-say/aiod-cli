@@ -26,11 +26,6 @@ const Ctx = ctxmod.Ctx;
 const BUF = 8 << 20;
 
 /// 打印错误响应并返回错误（返回 anyerror 以便在任意返回类型的函数里直接 return）。
-fn fail(c: *Ctx, res: httpc.Response) anyerror {
-    c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body }) catch {};
-    return error.HttpError;
-}
-
 fn auth(c: *Ctx) !httpc.Headers {
     const hs = try c.arena.alloc(std.http.Header, 2);
     var n: usize = 0;
@@ -67,15 +62,15 @@ fn cmdNew(c: *Ctx, a: util.Args) !void {
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 16 << 10));
     try w.print("{{\"id\":\"{s}\"", .{try util.jsonEscape(c.arena, id)});
     if (a.get("cwd")) |v| try w.print(",\"cwd\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
-    if (a.get("cols")) |v| try w.print(",\"cols\":{s}", .{v});
-    if (a.get("rows")) |v| try w.print(",\"rows\":{s}", .{v});
-    if (a.get("retention")) |v| try w.print(",\"retention\":\"{s}\"", .{v});
+    if (try util.intFlag(c, a, "cols")) |v| try w.print(",\"cols\":{d}", .{v});
+    if (try util.intFlag(c, a, "rows")) |v| try w.print(",\"rows\":{d}", .{v});
+    if (a.get("retention")) |v| try w.print(",\"retention\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
     if (a.get("user")) |v| try w.print(",\"user\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
-    if (a.get("no-change-timeout")) |v| try w.print(",\"no_change_timeout\":{s}", .{v});
+    if (try util.intFlag(c, a, "no-change-timeout")) |v| try w.print(",\"no_change_timeout\":{d}", .{v});
     try w.print("}}", .{});
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.postJson(c.client, try c.url("/v2/pty/sessions"), try jsonAuth(c), w.buffered(), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try out(c, res);
 }
 
@@ -88,31 +83,31 @@ fn cmdExec(c: *Ctx, a: util.Args) !void {
 
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 64 << 10));
     try w.print("{{\"command\":\"{s}\"", .{try util.jsonEscape(c.arena, cmd_txt)});
-    if (a.get("timeout")) |v| try w.print(",\"timeout\":{s}", .{v});
+    if (try util.intFlag(c, a, "timeout")) |v| try w.print(",\"timeout\":{d}", .{v});
     if (a.has("async")) try w.print(",\"async\":true", .{});
-    if (a.get("hard-timeout")) |v| try w.print(",\"hard_timeout\":{s}", .{v});
-    if (a.get("no-change-timeout")) |v| try w.print(",\"no_change_timeout\":{s}", .{v});
+    if (try util.intFlag(c, a, "hard-timeout")) |v| try w.print(",\"hard_timeout\":{d}", .{v});
+    if (try util.intFlag(c, a, "no-change-timeout")) |v| try w.print(",\"no_change_timeout\":{d}", .{v});
     try w.print("}}", .{});
 
-    const path = try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/exec", .{id});
+    const path = try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/exec", .{try util.urlEncode(c.arena, id)});
     const buf = try c.arena.alloc(u8, BUF);
     // exec 可能等满 timeout，HTTP 侧给足余量
     const res = try httpc.postJson(c.client, try c.url(path), try jsonAuth(c), w.buffered(), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try out(c, res);
 }
 
 fn cmdGet(c: *Ctx, path: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try out(c, res);
 }
 
 fn cmdSend(c: *Ctx, path: []const u8, body: []const u8, method: httpc.Method) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.request(c.client, method, try c.url(path), try jsonAuth(c), body, buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try out(c, res);
 }
 
@@ -169,11 +164,11 @@ fn cmdPtyWs(c: *Ctx, anon: bool, a: util.Args) !void {
     if (anon) {
         try wq.print("{s}/v2/pty/ws?protocol=json", .{info.path_prefix});
     } else {
-        try wq.print("{s}/v2/pty/sessions/{s}/ws?protocol=json", .{ info.path_prefix, a.at(0).? });
+        try wq.print("{s}/v2/pty/sessions/{s}/ws?protocol=json", .{ info.path_prefix, try util.urlEncode(c.arena, a.at(0).?) });
     }
     if (a.has("durable")) try wq.print("&durable=true", .{});
     if (a.has("restore")) try wq.print("&restore=true", .{});
-    if (a.get("replay-bytes")) |v| try wq.print("&replay_bytes={s}", .{v});
+    if (try util.intFlag(c, a, "replay-bytes")) |v| try wq.print("&replay_bytes={d}", .{v});
     const ws_path = wq.buffered();
 
     const host_header = try std.fmt.allocPrint(c.arena, "{s}:{d}", .{ info.host, info.port });
@@ -302,7 +297,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     }
     if (eq(cmd, "pty-info")) {
         const id = a.at(0) orelse return error.MissingArg;
-        try cmdGet(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{id}));
+        try cmdGet(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{try util.urlEncode(c.arena, id)}));
         return true;
     }
     if (eq(cmd, "pty")) {
@@ -311,7 +306,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     }
     if (eq(cmd, "pty-screen")) {
         const id = a.at(0) orelse return error.MissingArg;
-        try cmdGet(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/screen", .{id}));
+        try cmdGet(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/screen", .{try util.urlEncode(c.arena, id)}));
         return true;
     }
     if (eq(cmd, "pty-input")) {
@@ -322,14 +317,14 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
             try util.jsonEscape(c.arena, text),
             if (a.has("enter")) "true" else "false",
         });
-        try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/input", .{id}), w.buffered(), .POST);
+        try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/input", .{try util.urlEncode(c.arena, id)}), w.buffered(), .POST);
         return true;
     }
     if (eq(cmd, "pty-signal")) {
         const id = a.at(0) orelse return error.MissingArg;
         const sig = a.get("signal") orelse (a.at(1) orelse "SIGINT");
-        const body = try std.fmt.allocPrint(c.arena, "{{\"signal\":\"{s}\"}}", .{sig});
-        try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/signal", .{id}), body, .POST);
+        const body = try std.fmt.allocPrint(c.arena, "{{\"signal\":\"{s}\"}}", .{try util.jsonEscape(c.arena, sig)});
+        try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/signal", .{try util.urlEncode(c.arena, id)}), body, .POST);
         return true;
     }
     if (eq(cmd, "pty-resize")) {
@@ -337,28 +332,28 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 4096));
         try w.print("{{", .{});
         var first = true;
-        if (a.get("cols")) |v| {
-            try w.print("\"cols\":{s}", .{v});
+        if (try util.intFlag(c, a, "cols")) |v| {
+            try w.print("\"cols\":{d}", .{v});
             first = false;
         }
-        if (a.get("rows")) |v| {
+        if (try util.intFlag(c, a, "rows")) |v| {
             if (!first) try w.print(",", .{});
-            try w.print("\"rows\":{s}", .{v});
+            try w.print("\"rows\":{d}", .{v});
             first = false;
         }
-        if (a.get("no-change-timeout")) |v| {
+        if (try util.intFlag(c, a, "no-change-timeout")) |v| {
             if (!first) try w.print(",", .{});
-            try w.print("\"no_change_timeout\":{s}", .{v});
+            try w.print("\"no_change_timeout\":{d}", .{v});
         }
         try w.print("}}", .{});
-        try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{id}), w.buffered(), .PATCH);
+        try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{try util.urlEncode(c.arena, id)}), w.buffered(), .PATCH);
         return true;
     }
     if (eq(cmd, "pty-rm")) {
         const id = a.at(0) orelse return error.MissingArg;
         const buf = try c.arena.alloc(u8, BUF);
-        const res = try httpc.del(c.client, try c.url(try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{id})), try auth(c), buf);
-        if (!res.ok()) return fail(c, res);
+        const res = try httpc.del(c.client, try c.url(try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{try util.urlEncode(c.arena, id)})), try auth(c), buf);
+        try util.checkResp(c, res);
         try out(c, res);
         return true;
     }

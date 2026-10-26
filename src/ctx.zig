@@ -6,6 +6,8 @@ pub const Ctx = struct {
     client: *std.http.Client,
     arena: std.mem.Allocator,
     out: *std.Io.Writer,
+    /// 诊断 / 错误输出（stderr）：错误绝不能进 stdout —— `cat /a | tar x` 会把错误 JSON 喂给解包器
+    err: *std.Io.Writer,
     /// aiod 网关基址（末尾无斜杠），如 https://<host>/sandbox/<id>/8080
     base: []const u8,
     /// 可空鉴权 Key

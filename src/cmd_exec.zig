@@ -133,10 +133,10 @@ fn runBody(c: *Ctx, a: util.Args, command: []const u8, mode: ?[]const u8) ![]con
         }
     }
     if (a.get("env")) |v| try writeEnv(&w, c, v);
-    if (a.get("timeout")) |v| try w.print(",\"timeout\":{s}", .{v});
-    if (a.get("hard-timeout")) |v| try w.print(",\"hard_timeout\":{s}", .{v});
+    if (try util.intFlag(c, a, "timeout")) |v| try w.print(",\"timeout\":{d}", .{v});
+    if (try util.intFlag(c, a, "hard-timeout")) |v| try w.print(",\"hard_timeout\":{d}", .{v});
     if (a.get("args")) |v| try w.print(",\"args\":{s}", .{v});
-    if (a.get("max-output")) |v| try w.print(",\"max_output_length\":{s}", .{v});
+    if (try util.intFlag(c, a, "max-output")) |v| try w.print(",\"max_output_length\":{d}", .{v});
     try w.print("}}", .{});
     return w.buffered();
 }
@@ -147,23 +147,24 @@ fn cmdExecInner(c: *Ctx, a: util.Args) !void {
     const buf = try c.arena.alloc(u8, BUF);
 
     // 模式一：按 id 回读
-    if (a.get("id")) |id| {
+    if (a.get("id")) |raw_id| {
+        const id = try util.urlEncode(c.arena, raw_id);
         var qbuf: [256]u8 = undefined;
         var qn: usize = 0;
-        if (a.get("offset")) |v| {
-            const s = try std.fmt.bufPrint(qbuf[qn..], "offset={s}", .{v});
+        if (try util.intFlag(c, a, "offset")) |v| {
+            const s = try std.fmt.bufPrint(qbuf[qn..], "offset={d}", .{v});
             qn += s.len;
         }
-        if (a.get("stderr-offset")) |v| {
-            const s = try std.fmt.bufPrint(qbuf[qn..], "{s}stderr_offset={s}", .{ if (qn > 0) "&" else "", v });
+        if (try util.intFlag(c, a, "stderr-offset")) |v| {
+            const s = try std.fmt.bufPrint(qbuf[qn..], "{s}stderr_offset={d}", .{ if (qn > 0) "&" else "", v });
             qn += s.len;
         }
         if (a.has("wait")) {
             const s = try std.fmt.bufPrint(qbuf[qn..], "{s}wait=true", .{if (qn > 0) "&" else ""});
             qn += s.len;
         }
-        if (a.get("wait-timeout")) |v| {
-            const s = try std.fmt.bufPrint(qbuf[qn..], "{s}wait_timeout={s}", .{ if (qn > 0) "&" else "", v });
+        if (try util.intFlag(c, a, "wait-timeout")) |v| {
+            const s = try std.fmt.bufPrint(qbuf[qn..], "{s}wait_timeout={d}", .{ if (qn > 0) "&" else "", v });
             qn += s.len;
         }
         const q: []const u8 = if (qn > 0) qbuf[0..qn] else "";
@@ -172,8 +173,9 @@ fn cmdExecInner(c: *Ctx, a: util.Args) !void {
         else
             try std.fmt.allocPrint(c.arena, "/v2/commands/{s}", .{id});
         const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
-        if (!res.ok()) return errOut(c, res);
-        try emit(c, res.body);
+        try util.checkResp(c, res);
+        const code = try emit(c, res.body);
+        if (a.has("exit-code")) exitWithRemote(c, code);
         return;
     }
 
@@ -198,25 +200,32 @@ fn cmdExecInner(c: *Ctx, a: util.Args) !void {
     }
     const body = try runBody(c, a, command, null);
     const res = try httpc.postJson(c.client, try c.url("/v2/commands"), try jsonAuth(c), body, buf);
-    if (!res.ok()) return errOut(c, res);
-    try emit(c, res.body);
+    try util.checkResp(c, res);
+    const code = try emit(c, res.body);
+    if (a.has("exit-code")) exitWithRemote(c, code);
 }
 
-fn emit(c: *Ctx, json: []const u8) !void {
+fn emit(c: *Ctx, json: []const u8) !?i64 {
     const parsed = std.json.parseFromSlice(std.json.Value, c.arena, json, .{}) catch {
         try c.out.print("{s}\n", .{json});
-        return;
+        return null;
     };
     const v = parsed.value;
     try printOut(c, asStr(v, "stdout"), asStr(v, "stderr"));
-    if (asInt(v, "exit_code")) |code| {
-        if (code != 0) try c.out.print("（exit {d}）\n", .{code});
+    const code = asInt(v, "exit_code");
+    if (code) |k| {
+        if (k != 0) try c.out.print("（exit {d}）\n", .{k});
     }
+    return code;
 }
 
-fn errOut(c: *Ctx, res: httpc.Response) !void {
-    try c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body });
-    return error.HttpError;
+/// --exit-code：以沙箱内命令的退出码退出（默认行为不变：只打印「（exit N）」）。
+fn exitWithRemote(c: *Ctx, code: ?i64) noreturn {
+    c.out.flush() catch {};
+    c.err.flush() catch {};
+    const k = code orelse 1;
+    // 负数（如 -1 = 被信号杀死）按 shell 惯例映射到 1
+    std.process.exit(if (k >= 0) @intCast(@min(k, 255)) else 1);
 }
 
 /// async <命令> [--cwd=] [--env=] [--user=] —— 打印 command_id
@@ -243,7 +252,7 @@ fn cmdAsync(c: *Ctx, a: util.Args) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const body = try runBody(c, a, command, "async");
     const res = try httpc.postJson(c.client, try c.url("/v2/commands"), try jsonAuth(c), body, buf);
-    if (!res.ok()) return errOut(c, res);
+    try util.checkResp(c, res);
     const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch {
         try c.out.print("{s}\n", .{res.body});
         return;
@@ -265,9 +274,9 @@ fn cmdLog(c: *Ctx, a: util.Args) !void {
     var stderr_offset: i64 = 0;
     var rounds: usize = 0;
     while (true) {
-        const path = try std.fmt.allocPrint(c.arena, "/v2/commands/{s}?offset={d}&stderr_offset={d}", .{ id, offset, stderr_offset });
+        const path = try std.fmt.allocPrint(c.arena, "/v2/commands/{s}?offset={d}&stderr_offset={d}", .{ try util.urlEncode(c.arena, id), offset, stderr_offset });
         const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
-        if (!res.ok()) return errOut(c, res);
+        try util.checkResp(c, res);
 
         const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch {
             try c.out.print("{s}\n", .{res.body});
@@ -282,7 +291,12 @@ fn cmdLog(c: *Ctx, a: util.Args) !void {
         const done = std.mem.eql(u8, status, "completed") or std.mem.eql(u8, status, "failed") or
             std.mem.eql(u8, status, "killed") or std.mem.eql(u8, status, "exited") or
             std.mem.eql(u8, status, "timed_out");
-        if (done or !follow or rounds > 600) break;
+        if (done) break;
+        if (rounds > 600) {
+            try c.err.print("仍在运行，已放弃跟随（可用 log {s} 续读）\n", .{id});
+            return error.FollowTimeout;
+        }
+        if (!follow) break;
         rounds += 1;
         std.Io.sleep(c.io, .fromMilliseconds(500), .awake) catch {};
     }
@@ -295,9 +309,9 @@ fn cmdKill(c: *Ctx, a: util.Args) !void {
     var sdk = toSdk(c);
     _ = sdk_exec.kill(&sdk, id, sig) catch {
         if (sdk.last_body.len > 0) {
-            try c.out.print("{s}\n", .{sdk.last_body});
+            try c.err.print("{s}\n", .{sdk.last_body});
         } else {
-            try c.out.print("HTTP {d}\n", .{sdk.last_status});
+            try c.err.print("HTTP {d}\n", .{sdk.last_status});
         }
         return error.HttpError;
     };
@@ -311,9 +325,9 @@ fn cmdStdin(c: *Ctx, a: util.Args) !void {
     var sdk = toSdk(c);
     _ = sdk_exec.stdin(&sdk, id, text, a.has("enter")) catch {
         if (sdk.last_body.len > 0) {
-            try c.out.print("{s}\n", .{sdk.last_body});
+            try c.err.print("{s}\n", .{sdk.last_body});
         } else {
-            try c.out.print("HTTP {d}\n", .{sdk.last_status});
+            try c.err.print("HTTP {d}\n", .{sdk.last_status});
         }
         return error.HttpError;
     };
@@ -332,7 +346,7 @@ fn cmdSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         if (a.get("user")) |v| try w.print(",\"user\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
         try w.print("}}", .{});
         const res = try httpc.postJson(c.client, try c.url("/v2/commands/sessions"), try jsonAuth(c), w.buffered(), buf);
-        if (!res.ok()) return errOut(c, res);
+        try util.checkResp(c, res);
         try c.out.print("{s}\n", .{res.body});
         return;
     }
@@ -340,9 +354,9 @@ fn cmdSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         var sdk = toSdk(c);
         const body = sdk_exec.sessionList(&sdk) catch {
             if (sdk.last_body.len > 0) {
-                try c.out.print("{s}\n", .{sdk.last_body});
+                try c.err.print("{s}\n", .{sdk.last_body});
             } else {
-                try c.out.print("HTTP {d}\n", .{sdk.last_status});
+                try c.err.print("HTTP {d}\n", .{sdk.last_status});
             }
             return error.HttpError;
         };
@@ -354,9 +368,9 @@ fn cmdSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         var sdk = toSdk(c);
         _ = sdk_exec.sessionDelete(&sdk, id) catch {
             if (sdk.last_body.len > 0) {
-                try c.out.print("{s}\n", .{sdk.last_body});
+                try c.err.print("{s}\n", .{sdk.last_body});
             } else {
-                try c.out.print("HTTP {d}\n", .{sdk.last_status});
+                try c.err.print("HTTP {d}\n", .{sdk.last_status});
             }
             return error.HttpError;
         };
@@ -371,11 +385,11 @@ fn cmdSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         for (a.pos[2..]) |p| cmd_txt = try std.fmt.allocPrint(c.arena, "{s} {s}", .{ cmd_txt, p });
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, BODY));
         try w.print("{{\"command\":\"{s}\",\"session\":\"{s}\"", .{ try util.jsonEscape(c.arena, cmd_txt), try util.jsonEscape(c.arena, id) });
-        if (a.get("timeout")) |v| try w.print(",\"timeout\":{s}", .{v});
+        if (try util.intFlag(c, a, "timeout")) |v| try w.print(",\"timeout\":{d}", .{v});
         try w.print("}}", .{});
         const res = try httpc.postJson(c.client, try c.url("/v2/commands"), try jsonAuth(c), w.buffered(), buf);
-        if (!res.ok()) return errOut(c, res);
-        try emit(c, res.body);
+        try util.checkResp(c, res);
+        _ = try emit(c, res.body);
     }
 }
 

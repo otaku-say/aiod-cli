@@ -37,6 +37,8 @@ import urllib.request
 DEFAULT_BASE = "http://127.0.0.1:8080"
 HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options", "trace")
 VALID_STATUS = ("implemented", "not-planned")
+# WebSocket 路由（ws://）不会被 OpenAPI 登记成普通 HTTP 操作，不参与 HTTP 漂移比对
+VALID_TRANSPORT = ("http", "ws")
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MANIFEST = os.path.join(HERE, "v2-coverage.json")
 
@@ -53,9 +55,12 @@ def route_key(method: str, path: str) -> str:
 
 def fetch_openapi(base: str, timeout: float) -> tuple[dict, str]:
     url = base.rstrip("/") + "/openapi.json"
-    req = urllib.request.Request(
-        url, headers={"Accept": "application/json", "User-Agent": "aiod-cli-drift-check"}
-    )
+    headers = {"Accept": "application/json", "User-Agent": "aiod-cli-drift-check"}
+    # 网关启用鉴权（SANDBOX_KEY）时不带 Key 会永远 401 → 退出 2，链路闭不了环
+    key = os.environ.get("SANDBOX_KEY", "")
+    if key:
+        headers["X-API-KEY"] = key
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
     return json.loads(raw.decode("utf-8")), url
@@ -110,6 +115,9 @@ def load_manifest(path: str) -> dict:
             raise ValueError(f"{where}: status=implemented 必须给 command")
         if status == "not-planned" and not ep.get("reason"):
             raise ValueError(f"{where}: status=not-planned 必须给 reason")
+        transport = ep.get("transport", "http")
+        if transport not in VALID_TRANSPORT:
+            raise ValueError(f"{where}: transport 必须是 {VALID_TRANSPORT} 之一（得到 {transport!r}）")
         k = route_key(method, mpath)
         if k in seen:
             raise ValueError(f"{where}: 与前面的条目重复：{k}")
@@ -168,10 +176,15 @@ def main(argv: list[str] | None = None) -> int:
 
     api_in_scope = {route_key(m, p): (m, p) for (m, p) in api_ops if in_scope(p, scope)}
     api_out = [o for o in api_ops if not in_scope(o[1], scope)]
+    # transport=ws 的条目：OpenAPI 未必把它登记成普通 GET 操作，缺失时不能算「消失端点」，
+    # 但仍参与「新增端点」比对（有网关会把 ws 路由写进 openapi.json）
     manifest_eps = {route_key(e["method"], e["path"]): e for e in manifest["endpoints"]}
+    manifest_http = {
+        k: e for k, e in manifest_eps.items() if e.get("transport", "http") == "http"
+    }
 
     new = sorted(k for k in api_in_scope if k not in manifest_eps)
-    removed = sorted(k for k in manifest_eps if k not in api_in_scope)
+    removed = sorted(k for k in manifest_http if k not in api_in_scope)
 
     implemented = sum(1 for e in manifest["endpoints"] if e["status"] == "implemented")
     not_planned = sum(1 for e in manifest["endpoints"] if e["status"] == "not-planned")

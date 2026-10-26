@@ -187,25 +187,16 @@ def run_coverage():
             r_b = res_b.get("result", {})
             pass_b = r_b.get("isError") is True and len(r_b.get("content", [])) > 0
 
-        # Case (c): Failure path (HTTP 500 / 业务错误映射)
-        fail_args = dict(norm_args)
-        injected = False
-        for k, v in fail_args.items():
-            if isinstance(v, str):
-                fail_args[k] = "fail_500=true"
-                injected = True
-                break
-        if not injected:
-            for k, v in fail_args.items():
-                if isinstance(v, dict):
-                    fail_args[k] = {"fail_500": True}
-                    injected = True
-                    break
-
-        res_c = call("tools/call", {"name": name, "arguments": fail_args})
+        # Case (c): Failure path —— 路由级故障注入（mock 侧开关）。
+        # 旧的「往字符串参数里塞 fail_500=true」对 cols/action 这类非字符串参数完全失效，
+        # 且断言 `isError or 有内容` 恒真（500 带文本也算过）。
+        srv.set_fail_all(True)
+        try:
+            res_c = call("tools/call", {"name": name, "arguments": norm_args})
+        finally:
+            srv.set_fail_all(False)
         r_c = res_c.get("result", {})
-        # 如果能触发 500 则 isError 为 True，或者服务正常响应但错误处理信封规范
-        pass_c = r_c.get("isError") is True or (not r_c.get("isError") and len(r_c.get("content", [])) > 0)
+        pass_c = r_c.get("isError") is True and len(r_c.get("content", [])) > 0
 
         # 详细结论记录
         bad = [k for k, ok in (("a", pass_a), ("b", pass_b), ("c", pass_c)) if not ok]

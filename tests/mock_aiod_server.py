@@ -53,6 +53,15 @@ class MockAiodHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _fail_all(self):
+        """路由级故障注入开关（测试用）：置位后所有请求一律 500。"""
+        if not getattr(self.server, "fail_all", False):
+            return False
+        self.send_response(500)
+        self.end_headers()
+        self.wfile.write(b"Internal Error")
+        return True
+
     def _record(self, method, body):
         self.server.requests_log.append({
             "method": method,
@@ -63,6 +72,8 @@ class MockAiodHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record("GET", b"")
+        if self._fail_all():
+            return
         path = self.path
 
         req_path = path.split("?")[0]
@@ -97,6 +108,11 @@ class MockAiodHandler(BaseHTTPRequestHandler):
                 "success": True,
                 "data": [{"id": "sess-default", "cwd": "/root"}]
             })
+            return
+
+        if path.startswith("/v2/fs/read") and "big-trunc" in path:
+            # 超过命令侧 8 MiB buf：用于验证截断检测（M2）
+            self._reply_json(200, {"success": True, "data": {"content": "a" * (9 << 20)}})
             return
 
         if path.startswith("/v2/fs/read"):
@@ -276,6 +292,8 @@ class MockAiodHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self._read_body()
         self._record("POST", body)
+        if self._fail_all():
+            return
         path = self.path
         body_str = body.decode("utf-8", errors="replace") if body else ""
 
@@ -486,6 +504,8 @@ class MockAiodHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._record("DELETE", b"")
+        if self._fail_all():
+            return
         path = self.path
 
         if "fail_500=true" in path or "/fail_500" in path:
@@ -523,6 +543,8 @@ class MockAiodHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         body = self._read_body()
         self._record("PATCH", body)
+        if self._fail_all():
+            return
         path = self.path
 
         if path.startswith("/v2/pty/sessions/"):
@@ -536,6 +558,7 @@ class MockAiodServer:
     def __init__(self, host="127.0.0.1", port=0):
         self.server = ThreadingHTTPServer((host, port), MockAiodHandler)
         self.server.requests_log = []
+        self.server.fail_all = False
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -549,6 +572,10 @@ class MockAiodServer:
     @property
     def base_url(self):
         return f"http://127.0.0.1:{self.port}"
+
+    def set_fail_all(self, flag):
+        """统一故障注入：对纯数字/对象参数的请求同样生效（参数注入只对字符串参数有效）。"""
+        self.server.fail_all = flag
 
     def requests(self):
         return self.server.requests_log

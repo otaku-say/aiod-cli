@@ -23,7 +23,7 @@
 | 变量 | 必填 | 用途 |
 |---|---|---|
 | `SANDBOX_BASE` | 是（`help` 除外） | aiod 网关地址。缺失时打印两种合法写法并以退出码 1 结束。 |
-| `SANDBOX_KEY` | 否 | 鉴权 Key。非空时同时附 `Authorization: Bearer <key>` 与 `X-API-Key: <key>`。 |
+| `SANDBOX_KEY` | 否 | 鉴权 Key。非空时附 `X-API-Key: <key>`（空串视同未设置）。 |
 
 ### `SANDBOX_BASE` 的两种写法
 
@@ -265,7 +265,7 @@ aiod-cli exec —— 同步执行一条命令并打印输出
        非 0 退出码时补一行「（exit N）」。
 用法:  aiod-cli exec <命令> [参数…] [--cwd=<目录>] [--shell=<壳>] [--user=<用户>]
                       [--session=<会话id>] [--env=K=V,K2=V2] [--timeout=<毫秒>]
-                      [--hard-timeout=<秒>] [--args='["a","b"]'] [--max-output=<字节>]
+                      [--hard-timeout=<秒>] [--args='["a","b"]'] [--max-output=<字节>] [--exit-code]
        aiod-cli exec --id=<command_id> [--offset=<字节>] [--stderr-offset=<字节>]
                       [--wait] [--wait-timeout=<秒>]
 参数:  <命令> [参数…]  位置参数用空格拼成一条命令（不用自己转义引号）。
@@ -278,6 +278,7 @@ aiod-cli exec —— 同步执行一条命令并打印输出
        --hard-timeout=  秒；到点服务端强杀（返回 timed_out）。
        --args=       JSON 数组；仅 shell=none 时合法（argv 形式运行）。
        --max-output= 截断输出上限。
+       --exit-code   以沙箱内命令的退出码退出（默认只打印「（exit N）」）。
        --id=         改成「按 id 回读」模式，不带位置参数。
        --offset= / --stderr-offset=   回读时的字节偏移（增量取输出）。
        --wait / --wait-timeout=      回读时服务端等待至多 N 秒直到有输出/终态。
@@ -310,7 +311,8 @@ aiod-cli log —— 按 id 轮询/跟随输出
 
 用途:  GET /v2/commands/<id>，按 offset 增量读取 stdout/stderr。
 用法:  aiod-cli log <command_id> [--follow]
-参数:  --follow  循环直到状态变成 completed/failed/killed/exited（最多 600 轮 × 0.5s）。
+参数:  --follow  循环直到状态变成 completed/failed/killed/exited（最多 600 轮 × 0.5s，
+                  到点仍在跑则提示「已放弃跟随」并以非 0 退出）。
 示例:  aiod-cli log "$ID"
        aiod-cli log "$ID" --follow
 注意:  终态为 completed 且 exit_code=-1 时通常是被 kill 了，别用退出码反推信号。
@@ -796,7 +798,8 @@ aiod-cli code —— 用内置代码解释器执行一段代码
        --timeout=  毫秒。
 示例:  aiod-cli code 'print(sum(range(10)))'
        aiod-cli code 'console.log(1+1)' --lang=javascript
-注意:  status=error 时信封 success=false 但 data 完整，CLI 会打印 traceback 并非 0 退出。
+注意:  status=error 时信封 success=false（HTTP 仍是 200）→ message 与响应体（含 traceback）
+       打到 stderr，退出码非 0；stdout 不会混入错误内容。
 ```
 
 ### code-info

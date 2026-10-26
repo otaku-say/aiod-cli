@@ -14,6 +14,9 @@ pub const Response = struct {
     body: []const u8,
     /// `content-range` 响应头原文（Range 分块下载用；无则为空串）
     content_range: []const u8 = "",
+    /// 响应体填满了调用方 buf 且服务端声明还有更多 → body 是被切过的半截。
+    /// 用半截 body 当正文会切坏 UTF-8、写出解不开的 tar / 残缺 PNG。
+    truncated: bool = false,
 
     pub fn ok(self: Response) bool {
         return self.status >= 200 and self.status < 300;
@@ -113,12 +116,17 @@ pub fn request(
         zero_streak = 0;
         got += n;
     }
+    // 缓冲读满 = 可能被截断（无 content-length，或声明长度 > 已收字节）
+    const truncated = got == buf.len and blk: {
+        const wl = want orelse break :blk true;
+        break :blk wl > got;
+    };
     // 兜底：服务器无视"未请求压缩"仍返回压缩体时手动解压
     if (response.head.content_encoding != .identity) {
         const dec = try decompressBody(buf[0..got], response.head.content_encoding);
-        return .{ .status = status, .body = dec, .content_range = cr };
+        return .{ .status = status, .body = dec, .content_range = cr, .truncated = truncated };
     }
-    return .{ .status = status, .body = buf[0..got], .content_range = cr };
+    return .{ .status = status, .body = buf[0..got], .content_range = cr, .truncated = truncated };
 }
 
 /// 流式下载：把响应体直接写进文件，不经固定缓冲（大文件唯一正确姿势）。
@@ -126,7 +134,8 @@ pub fn request(
 pub const StreamResult = struct { status: u16, bytes: u64 };
 
 /// 流式落盘：把响应体直接写进已打开的文件，不经固定缓冲（大文件唯一正确姿势）。
-/// 返回状态码与实际写入字节数；文件位置由调用方维护（本函数只追加）。
+/// 从文件偏移 `offset` 开始写（位置写，不动 fd 位置）—— 使分段重试能精确复位。
+/// 返回状态码与实际写入字节数；截断/异常时文件里只会有 `offset + bytes` 字节。
 pub fn streamToFile(
     client: *std.http.Client,
     io: std.Io,
@@ -135,6 +144,7 @@ pub fn streamToFile(
     headers: Headers,
     payload: ?[]const u8,
     f: std.Io.File,
+    offset: u64,
 ) !StreamResult {
     const uri = try std.Uri.parse(url);
     var req = try std.http.Client.request(client, method, uri, .{
@@ -161,10 +171,6 @@ pub fn streamToFile(
     var tb: [4096]u8 = undefined;
     var rbuf: [64 << 10]u8 = undefined;
     const r = response.reader(&rbuf);
-    var wbuf: [64 << 10]u8 = undefined;
-    // 必须用 streaming 写：positional 模式每次新 writer 都从 offset 0 覆盖，
-    // 会导致分块下载时「后一段覆盖前一段」。streaming 走 fd 当前位置，可累加。
-    var fw = f.writerStreaming(io, &wbuf);
     var total: u64 = 0;
     var zero_streak: usize = 0;
     while (true) {
@@ -180,10 +186,10 @@ pub fn streamToFile(
             continue;
         }
         zero_streak = 0;
-        try fw.interface.writeAll(tb[0..n]);
+        // 位置写：fd 全局位置不参与，重试时只需把文件截回 offset 即可
+        try f.writePositionalAll(io, tb[0..n], offset + total);
         total += n;
     }
-    try fw.interface.flush();
     return .{ .status = status, .bytes = total };
 }
 

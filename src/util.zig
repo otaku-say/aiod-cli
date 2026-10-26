@@ -105,13 +105,70 @@ pub fn jsonHeaders(c: *Ctx, storage: *[3]std.http.Header) httpc.Headers {
     return storage[0..n];
 }
 
-/// 打印响应；非 2xx 时把状态码与正文一起报出，返回 error。
+/// 打印响应；非 2xx / 业务失败 / 截断时报错（错误走 stderr，退出码非 0）。
 pub fn printOrFail(c: *Ctx, res: httpc.Response) !void {
+    try checkResp(c, res);
+    try c.out.print("{s}\n", .{res.body});
+}
+
+/// 统一响应检查，所有「响应收进 buf」类命令的唯一入口：
+///   ① 超缓冲截断 ② 非 2xx ③ 信封 `success=false`（HTTP 200 但业务失败）
+/// 历史包袱：曾只判状态码，于是 200+success:false 被当成功退出 0（脚本假成功）。
+pub fn checkResp(c: *Ctx, res: httpc.Response) !void {
     if (!res.ok()) {
-        try c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body });
+        try c.err.print("HTTP {d}: {s}\n", .{ res.status, res.body });
         return error.HttpError;
     }
-    try c.out.print("{s}\n", .{res.body});
+    if (res.truncated) {
+        // 继续用会输出半个 JSON 信封当正文、写出解不开的 tar / 残缺 PNG
+        try c.err.print("⚠ 响应超上限已截断（{d} 字节），结果不完整\n", .{res.body.len});
+        return error.ResponseTruncated;
+    }
+    if (envelopeFailed(res.body)) {
+        const msg = topString(c, res.body, "message");
+        const hint = topString(c, res.body, "hint");
+        try c.err.print("HTTP {d}: {s}", .{ res.status, if (msg.len > 0) msg else "success=false" });
+        if (hint.len > 0) try c.err.print("（hint: {s}）", .{hint});
+        try c.err.print("\n", .{});
+        // 业务失败时 body 里带着有用信息（code 的 traceback 就在 data.outputs 里），随错误一起给出
+        if (res.body.len <= 4096) try c.err.print("{s}\n", .{res.body});
+        return error.ApiError;
+    }
+}
+
+/// 信封失败判定：顶层 `"success": false`。
+/// 只认 JSON 对象（二进制 / tar / 纯文本不会以 '{' 开头）；
+/// serde 按字母序输出，`success` 常在信封末尾，所以头尾各扫一段。
+fn envelopeFailed(body: []const u8) bool {
+    if (body.len == 0 or body[0] != '{') return false;
+    const tail_start = body.len -| 1024;
+    return hasSuccessFalse(body[0..@min(body.len, 512)]) or hasSuccessFalse(body[tail_start..]);
+}
+
+fn hasSuccessFalse(s: []const u8) bool {
+    const i = std.mem.indexOf(u8, s, "\"success\"") orelse return false;
+    var j = i + "\"success\"".len;
+    while (j < s.len and (s[j] == ' ' or s[j] == ':' or s[j] == '\t')) j += 1;
+    return std.mem.startsWith(u8, s[j..], "false");
+}
+
+/// 取顶层字符串字段（失败信封很小，解析成本可忽略）。
+fn topString(c: *Ctx, body: []const u8, key: []const u8) []const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, c.arena, body, .{}) catch return "";
+    if (parsed.value != .object) return "";
+    const f = parsed.value.object.get(key) orelse return "";
+    if (f != .string) return "";
+    return f.string;
+}
+
+/// 数值型 flag：缺失返回 null；非整数 → 可读错误。
+/// 不要把用户原样输入拼进 JSON（`--timeout=60s` → 整包非法，用户看到无关的 422）。
+pub fn intFlag(c: *Ctx, a: Args, name: []const u8) !?i64 {
+    const v = a.get(name) orelse return null;
+    return std.fmt.parseInt(i64, v, 10) catch {
+        try c.err.print("无效的 --{s} 值：{s}（应为整数）\n", .{ name, v });
+        return error.InvalidFlag;
+    };
 }
 
 /// JSON 字符串转义（不依赖 std.json 的 Stringify，行为可控）。
@@ -207,8 +264,8 @@ pub fn jsonEscapedLen(s: []const u8) usize {
     return n;
 }
 
-/// 从 stdin 读取最多 max_bytes 字节
-pub fn readStdinAlloc(io: std.Io, arena: std.mem.Allocator, max_bytes: usize) ![]const u8 {
+/// 从 stdin 读全部内容（不裁剪）。超过 max_bytes 报错 —— 绝不静默上传截断内容。
+pub fn readStdinBinary(io: std.Io, arena: std.mem.Allocator, max_bytes: usize) ![]const u8 {
     const buf = try arena.alloc(u8, max_bytes);
     var rbuf: [8192]u8 = undefined;
     var r = std.Io.File.stdin().reader(io, &rbuf);
@@ -218,7 +275,17 @@ pub fn readStdinAlloc(io: std.Io, arena: std.mem.Allocator, max_bytes: usize) ![
         if (n == 0) break;
         total += n;
     }
-    return std.mem.trim(u8, buf[0..total], " \r\n\t");
+    if (total == buf.len) {
+        // 缓冲区读满后再探 1 字节：还有输入即超限
+        var probe: [1]u8 = undefined;
+        if ((r.interface.readSliceShort(&probe) catch 0) > 0) return error.StdinTooLarge;
+    }
+    return buf[0..total];
+}
+
+/// 从 stdin 读取最多 max_bytes 字节（裁剪首尾空白，供代码/命令文本用）
+pub fn readStdinAlloc(io: std.Io, arena: std.mem.Allocator, max_bytes: usize) ![]const u8 {
+    return std.mem.trim(u8, try readStdinBinary(io, arena, max_bytes), " \r\n\t");
 }
 
 /// POSIX 单引号转义（' → '\''）：把任意文本安全嵌入 shell 命令。

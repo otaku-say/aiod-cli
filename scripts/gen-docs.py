@@ -108,7 +108,7 @@ HEAD = [
     "| 变量 | 必填 | 用途 |",
     "|---|---|---|",
     "| `SANDBOX_BASE` | 是（`help` 除外） | aiod 网关地址。缺失时打印两种合法写法并以退出码 1 结束。 |",
-    "| `SANDBOX_KEY` | 否 | 鉴权 Key。非空时同时附 `Authorization: Bearer <key>` 与 `X-API-Key: <key>`。 |",
+    "| `SANDBOX_KEY` | 否 | 鉴权 Key。非空时附 `X-API-Key: <key>`（空串视同未设置）。 |",
     "",
     "### `SANDBOX_BASE` 的两种写法",
     "",

@@ -16,9 +16,11 @@ pub fn sandboxBase() ?[]const u8 {
     return getenv("SANDBOX_BASE");
 }
 
-/// aiod 鉴权 Key（可选）。
+/// aiod 鉴权 Key（可选）。空串当作未设置 —— 否则会发一个空的 X-API-KEY 头，全部 401。
 pub fn sandboxKey() ?[]const u8 {
-    return getenv("SANDBOX_KEY");
+    const k = getenv("SANDBOX_KEY") orelse return null;
+    if (k.len == 0) return null;
+    return k;
 }
 
 /// 默认单次请求超时（秒），可由 --timeout 覆盖。

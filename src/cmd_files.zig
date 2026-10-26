@@ -16,11 +16,6 @@ const httpc = @import("httpc.zig");
 const Ctx = ctxmod.Ctx;
 const BUF = 8 << 20;
 
-fn fail(c: *Ctx, res: httpc.Response) !void {
-    try c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body });
-    return error.HttpError;
-}
-
 fn queryPath(c: *Ctx, base_path: []const u8, path: []const u8, user: ?[]const u8) ![]const u8 {
     const enc = try urlEncode(c.arena, path);
     if (user) |u| {
@@ -59,7 +54,7 @@ fn urlEncode(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
 fn getJSON(c: *Ctx, path: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try c.out.print("{s}\n", .{res.body});
 }
 
@@ -67,7 +62,7 @@ fn getJSON(c: *Ctx, path: []const u8) !void {
 fn postJSON(c: *Ctx, path: []const u8, body: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.postJson(c.client, try c.url(path), try jsonAuth(c), body, buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try c.out.print("{s}\n", .{res.body});
 }
 
@@ -78,10 +73,10 @@ fn cmdCat(c: *Ctx, a: util.Args) !void {
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 1024));
     try w.print("/v2/fs/read?path={s}", .{try urlEncode(c.arena, path)});
     if (a.get("user")) |u| try w.print("&user={s}", .{try urlEncode(c.arena, u)});
-    if (a.get("start")) |v| try w.print("&start_line={s}", .{v});
-    if (a.get("end")) |v| try w.print("&end_line={s}", .{v});
+    if (try util.intFlag(c, a, "start")) |v| try w.print("&start_line={d}", .{v});
+    if (try util.intFlag(c, a, "end")) |v| try w.print("&end_line={d}", .{v});
     const res = try httpc.get(c.client, try c.url(w.buffered()), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     // aiod 返回 {"success":true,"data":{"content":"..."}}，提取 content 原样输出
     const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch {
         try c.out.print("{s}", .{res.body});
@@ -110,16 +105,7 @@ fn cmdWrite(c: *Ctx, a: util.Args) !void {
 
     var data: []const u8 = "";
     if (std.mem.eql(u8, local, "-")) {
-        const buf = try c.arena.alloc(u8, BUF);
-        var rbuf: [8192]u8 = undefined;
-        var r = std.Io.File.stdin().reader(c.io, &rbuf);
-        var total: usize = 0;
-        while (total < buf.len) {
-            const n = r.interface.readSliceShort(buf[total..]) catch break;
-            if (n == 0) break;
-            total += n;
-        }
-        data = buf[0..total];
+        data = try util.readStdinBinary(c.io, c.arena, BUF);
     } else {
         const dir = std.Io.Dir.cwd();
         data = dir.readFileAlloc(c.io, local, c.arena, .limited(BUF)) catch |e| return e;
@@ -188,11 +174,11 @@ fn cmdGet(c: *Ctx, a: util.Args) !void {
         if (no_range) break :blk 0;
         const v = a.get("chunk") orelse break :blk 4 << 20; // 默认 4 MiB/段
         const parsed = std.fmt.parseInt(u64, v, 10) catch {
-            try c.out.print("无效的 --chunk 值：{s}（应为字节数）\n", .{v});
+            try c.err.print("无效的 --chunk 值：{s}（应为字节数）\n", .{v});
             return error.InvalidChunk;
         };
         if (parsed < 1024) {
-            try c.out.print("--chunk 过小：{d}（至少 1024 字节）\n", .{parsed});
+            try c.err.print("--chunk 过小：{d}（至少 1024 字节）\n", .{parsed});
             return error.InvalidChunk;
         }
         break :blk parsed;
@@ -221,7 +207,7 @@ fn cmdGet(c: *Ctx, a: util.Args) !void {
                 },
                 200, 416 => range_ok = false,
                 else => {
-                    try c.out.print("HTTP {d}: {s}\n", .{ resp.status, resp.body });
+                    try c.err.print("HTTP {d}: {s}\n", .{ resp.status, resp.body });
                     return error.HttpError;
                 },
             }
@@ -235,9 +221,9 @@ fn cmdGet(c: *Ctx, a: util.Args) !void {
     if (!range_ok) {
         // ---------- 整段流式下载 ----------
         const headers = try auth(c);
-        const st = try httpc.streamToFile(c.client, c.io, .GET, base_url, headers, null, f);
+        const st = try httpc.streamToFile(c.client, c.io, .GET, base_url, headers, null, f, 0);
         if (st.status < 200 or st.status >= 300) {
-            try c.out.print("HTTP {d}\n", .{st.status});
+            try c.err.print("HTTP {d}\n", .{st.status});
             return error.HttpError;
         }
         try dir.rename(part, dir, local, c.io);
@@ -254,20 +240,23 @@ fn cmdGet(c: *Ctx, a: util.Args) !void {
     while (written < total) {
         const want_end = @min(written + chunk - 1, total - 1);
         const hs = try rangeHeaders(c, written, want_end);
-        const st = httpc.streamToFile(c.client, c.io, .GET, base_url, hs, null, f) catch |e| {
+        const st = httpc.streamToFile(c.client, c.io, .GET, base_url, hs, null, f, written) catch |e| {
             attempt += 1;
+            // 失败的段可能已写了半截：截回已确认位点，下一段才不会从中间接续（大小对、内容错位）
+            try f.setLength(c.io, written);
             if (attempt >= max_attempts) {
-                try c.out.print("第 {d} 段失败（{t}），已重试 {d} 次\n", .{ written / chunk, e, attempt });
+                try c.err.print("第 {d} 段失败（{t}），已重试 {d} 次\n", .{ written / chunk, e, attempt });
                 return e;
             }
             const secs: i64 = @intCast(@min(@as(u64, 1) << @intCast(@min(attempt, 5)), 32));
-            try c.out.print("第 {d} 段失败，{d}s 后重试\n", .{ written / chunk, secs });
+            try c.err.print("第 {d} 段失败，{d}s 后重试\n", .{ written / chunk, secs });
             std.Io.sleep(c.io, .fromSeconds(secs), .awake) catch {};
             continue;
         };
         if (st.status == 416) break; // 越界：按完成处理
         if (st.status != 206 and st.status != 200) {
-            try c.out.print("HTTP {d}\n", .{st.status});
+            try f.setLength(c.io, written);
+            try c.err.print("HTTP {d}\n", .{st.status});
             return error.HttpError;
         }
         if (st.bytes == 0) {
@@ -282,7 +271,7 @@ fn cmdGet(c: *Ctx, a: util.Args) !void {
     }
 
     if (written != total) {
-        try c.out.print("下载不完整：期望 {d} 字节，实际 {d} 字节（.part 已保留，可续跑）\n", .{ total, written });
+        try c.err.print("下载不完整：期望 {d} 字节，实际 {d} 字节（.part 已保留，可续跑）\n", .{ total, written });
         return error.ShortRead;
     }
     try dir.rename(part, dir, local, c.io);
@@ -342,8 +331,8 @@ fn cmdEdit(c: *Ctx, a: util.Args) !void {
         });
         if (replace_mode) |m| try w.print(",\"replace_mode\":\"{s}\"", .{m});
         try w.print("}}", .{});
-    } else if (a.get("insert")) |line| {
-        try w.print("{{\"path\":\"{s}\",\"command\":\"insert\",\"insert_line\":{s},\"new_str\":\"{s}\"}}", .{
+    } else if (try util.intFlag(c, a, "insert")) |line| {
+        try w.print("{{\"path\":\"{s}\",\"command\":\"insert\",\"insert_line\":{d},\"new_str\":\"{s}\"}}", .{
             try util.jsonEscape(c.arena, path), line, try util.jsonEscape(c.arena, a.get("text") orelse ""),
         });
     } else return error.MissingArg;
@@ -374,9 +363,9 @@ fn cmdGrep(c: *Ctx, a: util.Args) !void {
     if (a.has("fixed")) try w.print(",\"fixed_strings\":true", .{});
     if (a.has("ignore-case")) try w.print(",\"case_insensitive\":true", .{});
     if (a.has("multiline")) try w.print(",\"multiline\":true", .{});
-    if (a.get("context")) |v| try w.print(",\"context_before\":{s},\"context_after\":{s}", .{ v, v });
-    if (a.get("max")) |v| try w.print(",\"max_results\":{s}", .{v});
-    if (a.get("offset")) |v| try w.print(",\"offset\":{s}", .{v});
+    if (try util.intFlag(c, a, "context")) |v| try w.print(",\"context_before\":{d},\"context_after\":{d}", .{ v, v });
+    if (try util.intFlag(c, a, "max")) |v| try w.print(",\"max_results\":{d}", .{v});
+    if (try util.intFlag(c, a, "offset")) |v| try w.print(",\"offset\":{d}", .{v});
     if (a.get("type")) |v| try w.print(",\"type\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
     if (a.get("include")) |v| try writeStrArray(&w, c, "include", v);
     if (a.get("exclude")) |v| try writeStrArray(&w, c, "exclude", v);
@@ -462,15 +451,15 @@ fn putChunkedUpload(c: *Ctx, local: []const u8, remote: []const u8, file_size: u
         const len = @min(CHUNK, file_size - offset);
         const part_name = try std.fmt.allocPrint(c.arena, ".aiod-put-{x}-{d}", .{ token, i });
         const res = httpc.uploadFileMultipartRange(c.client, c.io, try c.url("/v2/fs/upload"), hs, boundary, "file", part_name, local, offset, len, buf) catch |e| {
-            try c.out.print("段 {d}/{d} 上传失败: {t}\n", .{ i + 1, nchunks, e });
+            try c.err.print("段 {d}/{d} 上传失败: {t}\n", .{ i + 1, nchunks, e });
             return e;
         };
-        if (!res.ok()) return fail(c, res);
+        try util.checkResp(c, res);
         const tmp = blk: {
             const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch break :blk null;
             break :blk dataString(parsed.value, "file_path");
         } orelse {
-            try c.out.print("段 {d} 响应缺少 file_path: {s}\n", .{ i, res.body });
+            try c.err.print("段 {d} 响应缺少 file_path: {s}\n", .{ i, res.body });
             return error.NoFilePath;
         };
         parts[@intCast(i)] = try c.arena.dupe(u8, tmp);
@@ -488,7 +477,7 @@ fn putChunkedUpload(c: *Ctx, local: []const u8, remote: []const u8, file_size: u
     };
     const code = try execShellCode(c, cmd);
     if (code == null or code.? != 0) {
-        try c.out.print("拼接失败（exit={?d}）；临时分片保留在沙箱 /tmp 便于排查\n", .{code});
+        try c.err.print("拼接失败（exit={?d}）；临时分片保留在沙箱 /tmp 便于排查\n", .{code});
         return error.ConcatFailed;
     }
     try c.out.print("已上传 {s} -> {s}（{d} 字节，分 {d} 段）\n", .{ local, remote, file_size, nchunks });
@@ -502,21 +491,8 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
     if (std.mem.lastIndexOfScalar(u8, local, '/')) |i| fname = local[i + 1 ..];
     if (std.mem.eql(u8, fname, "-")) fname = "stdin.bin";
 
-    // 预检查：目标已存在时自动加 --overwrite，避免 move 失败导致临时文件残留
-    var need_overwrite = a.has("overwrite");
-    if (!need_overwrite) {
-        var stat_w = std.Io.Writer.fixed(try c.arena.alloc(u8, 1024));
-        try stat_w.print("/v2/fs/stat?path={s}", .{try urlEncode(c.arena, remote)});
-        if (a.get("user")) |u| try stat_w.print("&user={s}", .{try urlEncode(c.arena, u)});
-        const stat_buf = try c.arena.alloc(u8, BUF);
-        const stat_res = httpc.get(c.client, try c.url(stat_w.buffered()), try auth(c), stat_buf) catch null;
-        if (stat_res) |sr| {
-            if (sr.ok()) {
-                std.debug.print("目标已存在，自动启用 --overwrite\n", .{});
-                need_overwrite = true;
-            }
-        }
-    }
+    // 不加 --overwrite 时由服务端 move 失败（与 help put 的描述一致，不偷偷覆盖）
+    const need_overwrite = a.has("overwrite");
 
     const boundary = "ZigAioCliBoundary7f3a9c";
     const ct = try std.fmt.allocPrint(c.arena, "multipart/form-data; boundary={s}", .{boundary});
@@ -537,18 +513,7 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
 
     if (std.mem.eql(u8, local, "-")) {
         // stdin：无长度信息，仍需整体读入（保持 64 MiB 上限）
-        const data = blk: {
-            const b = try c.arena.alloc(u8, 64 << 20);
-            var rbuf: [8192]u8 = undefined;
-            var r = std.Io.File.stdin().reader(c.io, &rbuf);
-            var total: usize = 0;
-            while (total < b.len) {
-                const n = r.interface.readSliceShort(b[total..]) catch break;
-                if (n == 0) break;
-                total += n;
-            }
-            break :blk b[0..total];
-        };
+        const data = try util.readStdinBinary(c.io, c.arena, 64 << 20);
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, data.len + 4096));
         try w.print("--{s}\r\n", .{boundary});
         try w.print("Content-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\n", .{fname});
@@ -560,12 +525,12 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
     } else {
         // 文件：按大小选路径 —— 小文件流式单请求；大文件分块（规避单连接中断）
         var probe_f = std.Io.Dir.cwd().openFile(c.io, local, .{}) catch |e| {
-            try c.out.print("读取本地文件 {s} 失败: {t}\n", .{ local, e });
+            try c.err.print("读取本地文件 {s} 失败: {t}\n", .{ local, e });
             return e;
         };
         const st = probe_f.stat(c.io) catch |e| {
             probe_f.close(c.io);
-            try c.out.print("读取本地文件 {s} 失败: {t}\n", .{ local, e });
+            try c.err.print("读取本地文件 {s} 失败: {t}\n", .{ local, e });
             return e;
         };
         probe_f.close(c.io);
@@ -576,17 +541,17 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
             return; // 分块路径已在沙箱内完成拼接落地
         }
         res = httpc.uploadFileMultipartRange(c.client, c.io, try c.url("/v2/fs/upload"), hs[0..hn], boundary, "file", fname, local, 0, st.size, buf) catch |e| {
-            try c.out.print("上传 {s} 失败: {t}\n", .{ local, e });
+            try c.err.print("上传 {s} 失败: {t}\n", .{ local, e });
             return e;
         };
         uploaded = st.size;
     }
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     const tmp = blk: {
         const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch break :blk null;
         break :blk dataString(parsed.value, "file_path");
     } orelse {
-        try c.out.print("上传响应缺少 file_path: {s}\n", .{res.body});
+        try c.err.print("上传响应缺少 file_path: {s}\n", .{res.body});
         return error.NoFilePath;
     };
 
@@ -607,7 +572,8 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
         });
         const buf3 = try c.arena.alloc(u8, BUF);
         _ = httpc.postJson(c.client, try c.url("/v2/fs/delete"), try jsonAuth(c), cleanup, buf3) catch {};
-        return fail(c, mres);
+        try util.checkResp(c, mres);
+        return error.HttpError;
     }
     try c.out.print("已上传 {s} -> {s}（{d} 字节）\n", .{ local, remote, uploaded });
 }
@@ -619,19 +585,10 @@ fn cmdFsTreePut(c: *Ctx, a: util.Args) !void {
 
     var raw: []const u8 = undefined;
     if (std.mem.eql(u8, src, "-")) {
-        const buf = try c.arena.alloc(u8, 256 << 20);
-        var rbuf: [8192]u8 = undefined;
-        var r = std.Io.File.stdin().reader(c.io, &rbuf);
-        var total: usize = 0;
-        while (total < buf.len) {
-            const n = r.interface.readSliceShort(buf[total..]) catch break;
-            if (n == 0) break;
-            total += n;
-        }
-        raw = buf[0..total];
+        raw = try util.readStdinBinary(c.io, c.arena, 256 << 20);
     } else {
         raw = std.Io.Dir.cwd().readFileAlloc(c.io, src, c.arena, .limited(256 << 20)) catch |e| {
-            try c.out.print("读取本地文件 {s} 失败: {t}\n", .{ src, e });
+            try c.err.print("读取本地文件 {s} 失败: {t}\n", .{ src, e });
             return e;
         };
     }
@@ -639,7 +596,7 @@ fn cmdFsTreePut(c: *Ctx, a: util.Args) !void {
     var payload = raw;
     if (raw.len >= 2 and raw[0] == 0x1f and raw[1] == 0x8b) {
         payload = gunzip(c.arena, raw) catch |e| {
-            try c.out.print("gzip 解压失败（{t}）\n提示：可先在本地解压：gunzip -c x.tgz | aiod-cli fs-tree-put - <远端目录>\n", .{e});
+            try c.err.print("gzip 解压失败（{t}）\n提示：可先在本地解压：gunzip -c x.tgz | aiod-cli fs-tree-put - <远端目录>\n", .{e});
             return e;
         };
         std.debug.print("提示: 输入为 gzip，已在本地解压为原始 tar 再上传\n", .{});
@@ -659,7 +616,7 @@ fn cmdFsTreePut(c: *Ctx, a: util.Args) !void {
 
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.request(c.client, .PUT, try c.url(q), hs[0..hn], payload, buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     if (a.has("json")) {
         try c.out.print("{s}\n", .{res.body});
         return;
@@ -736,7 +693,7 @@ fn cmdTree(c: *Ctx, a: util.Args) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const q = try queryPath(c, "/v2/fs/tree", path, a.get("user"));
     const res = try httpc.get(c.client, try c.url(q), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
 
     if (a.has("tar")) {
         try c.out.writeAll(res.body); // 原始 tar 字节，不加修饰
@@ -844,7 +801,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
         if (a.get("user")) |u| try w.print("&user={s}", .{try urlEncode(c.arena, u)});
         if (a.has("recursive")) try w.print("&recursive=true", .{});
         if (a.has("hidden")) try w.print("&show_hidden=true", .{});
-        if (a.get("depth")) |d| try w.print("&max_depth={s}", .{d});
+        if (try util.intFlag(c, a, "depth")) |d| try w.print("&max_depth={d}", .{d});
         try getJSON(c, w.buffered());
         return true;
     }

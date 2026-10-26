@@ -457,6 +457,7 @@
     {
       "method": "GET",
       "path": "/v2/pty/sessions/{id}/ws",
+      "transport": "ws",
       "status": "implemented",
       "command": "pty-ws",
       "note": "--send/--max/--raw；支持 wss://"
@@ -464,6 +465,7 @@
     {
       "method": "GET",
       "path": "/v2/pty/ws",
+      "transport": "ws",
       "status": "implemented",
       "command": "pty-ws-anon",
       "note": "--max"

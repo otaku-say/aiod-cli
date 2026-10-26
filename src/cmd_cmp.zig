@@ -34,11 +34,6 @@ fn toSdk(c: *Ctx) sdkmod.Sdk {
 
 // ---------------- 基础 ----------------
 
-fn fail(c: *Ctx, res: httpc.Response) !void {
-    try c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body });
-    return error.HttpError;
-}
-
 fn auth(c: *Ctx) !httpc.Headers {
     const hs = try c.arena.alloc(std.http.Header, 2);
     var n: usize = 0;
@@ -68,14 +63,14 @@ fn jsonAuth(c: *Ctx) !httpc.Headers {
 fn getJSON(c: *Ctx, path: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try c.out.print("{s}\n", .{res.body});
 }
 
 fn postJSON(c: *Ctx, path: []const u8, body: []const u8) !void {
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.postJson(c.client, try c.url(path), try jsonAuth(c), body, buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     try c.out.print("{s}\n", .{res.body});
 }
 
@@ -213,7 +208,7 @@ fn cmdShot(c: *Ctx, a: util.Args) !void {
     const out_path = a.at(0) orelse "screenshot.png";
     const buf = try c.arena.alloc(u8, BUF);
     const res = try httpc.get(c.client, try c.url("/v2/computer/screenshot"), try auth(c), buf);
-    if (!res.ok()) return fail(c, res);
+    try util.checkResp(c, res);
     const f = try std.Io.Dir.cwd().createFile(c.io, out_path, .{});
     defer f.close(c.io);
     var wbuf: [8192]u8 = undefined;
@@ -307,12 +302,12 @@ fn cmdActBatch(c: *Ctx, a: util.Args) !void {
 /// cmp-record [--action=start|stop] [--fps=] [--crf=] [--max-duration=] [--width=] [--height=] [--save-path=]
 fn cmdRecord(c: *Ctx, a: util.Args) !void {
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 16 << 10));
-    try w.print("{{\"action\":\"{s}\"", .{a.get("action") orelse "start"});
-    if (a.get("fps")) |v| try w.print(",\"fps\":{s}", .{v});
-    if (a.get("crf")) |v| try w.print(",\"crf\":{s}", .{v});
-    if (a.get("max-duration")) |v| try w.print(",\"max_duration\":{s}", .{v});
-    if (a.get("width")) |v| try w.print(",\"width\":{s}", .{v});
-    if (a.get("height")) |v| try w.print(",\"height\":{s}", .{v});
+    try w.print("{{\"action\":\"{s}\"", .{try util.jsonEscape(c.arena, a.get("action") orelse "start")});
+    if (try util.intFlag(c, a, "fps")) |v| try w.print(",\"fps\":{d}", .{v});
+    if (try util.intFlag(c, a, "crf")) |v| try w.print(",\"crf\":{d}", .{v});
+    if (try util.intFlag(c, a, "max-duration")) |v| try w.print(",\"max_duration\":{d}", .{v});
+    if (try util.intFlag(c, a, "width")) |v| try w.print(",\"width\":{d}", .{v});
+    if (try util.intFlag(c, a, "height")) |v| try w.print(",\"height\":{d}", .{v});
     if (a.get("save-path")) |v| {
         try w.print(",\"save_path\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
     }
@@ -329,7 +324,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "cmp-info")) {
         var sdk = toSdk(c);
         const body = sdk_desktop.info(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -342,7 +337,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "cmp-cursor")) {
         var sdk = toSdk(c);
         const body = sdk_desktop.cursor(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -351,7 +346,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "cmp-clipboard")) {
         var sdk = toSdk(c);
         const body = sdk_desktop.clipboard(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -360,7 +355,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "cmp-windows")) {
         var sdk = toSdk(c);
         const body = sdk_desktop.windows(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});

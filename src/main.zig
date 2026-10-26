@@ -33,9 +33,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer client.deinit();
 
     var out_buf: [16 * 1024]u8 = undefined;
-    var stdout_w = std.Io.File.stdout().writer(io, &out_buf);
+    // writerStreaming（而非 writer）：positional 模式每次 flush 都从 offset 0 写，
+    // 重定向到文件时会把前一段输出覆盖掉
+    var stdout_w = std.Io.File.stdout().writerStreaming(io, &out_buf);
     const out = &stdout_w.interface;
     defer out.flush() catch {};
+
+    var err_buf: [4 * 1024]u8 = undefined;
+    var stderr_w = std.Io.File.stderr().writerStreaming(io, &err_buf);
+    const errw = &stderr_w.interface;
+    defer errw.flush() catch {};
 
     var arg_storage: [256][]const u8 = undefined;
     var arg_count: usize = 0;
@@ -121,6 +128,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .client = &client,
         .arena = arena,
         .out = out,
+        .err = errw,
         .base = trimSlashRight(base),
         .key = cfg.sandboxKey(),
     };

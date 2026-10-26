@@ -20,7 +20,7 @@
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `SANDBOX_BASE` | 是（`help` 除外） | aiod 网关地址。两种写法：`https://<网关>/sandbox/<sandboxID>/8080`（远程遥控）或 `http://127.0.0.1:8080`（沙箱内自测）。末尾多余的 `/` 会自动去掉。 |
-| `SANDBOX_KEY` | 否 | 鉴权 Key（非空时附 `Authorization: Bearer` + `X-API-Key`） |
+| `SANDBOX_KEY` | 否 | 鉴权 Key（非空时附 `X-API-Key`；空串视同未设置） |
 
 `SANDBOX_BASE` 的值就是 [`cube-cli`](https://github.com/otaku-say/cube-cli) `new` 打印的
 `[sandbox] AIO 网关:` 那行（末尾的 `/` 无所谓）；端口也不总是 8080（轻量镜像是 18091），
@@ -304,6 +304,6 @@ var client: std.http.Client = .{ .allocator = gpa, .io = io };
 - **flag 一律 `--key=value` 等号写法**（例：`--lang=python`）；布尔开关直接写 `--flag`。
 - **未知命令**会打印「未知命令：xxx」并以**非 0** 退出码结束。
 - `--help` / `-h` / `help <命令>` 三种写法等价，且**绝不触发真实操作**。
-- 响应信封统一 `{success, message, data, hint}`；非 2xx 或 `success=false` 会转成
-  `HTTP <码>: <message>（hint: …）` 并以非 0 退出。
+- 错误一律走 stderr：非 2xx、`success=false`、响应超上限截断都会转成可读错误并以非 0 退出，
+  所以 `aiod-cli cat <文件> > out.txt` 的 out.txt 里不会混进错误 JSON。
 - 文档里标了「源码未实现」的选项确实没有接线，别照抄旧文档。
