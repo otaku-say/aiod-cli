@@ -1,0 +1,28 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: 构建 aiod-cli (Debug)
+        run: zig build
+
+      - name: 运行全量测试套件
+        run: sh tests/run_all.sh
+
+      - name: 校验文档与 help 严格同步
+        run: |
+          python3 scripts/gen-docs.py
+          git diff --exit-code docs/

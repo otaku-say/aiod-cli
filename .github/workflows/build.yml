@@ -1,0 +1,122 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 发布矩阵（产物名固定 <tool>-<os>-<arch>[.exe]）：
+#   aiod-cli-linux-arm64   aarch64-linux-musl   （ubuntu-24.04-arm 原生跑）
+#   aiod-cli-linux-amd64   x86_64-linux-musl
+#   aiod-cli-macos-arm64   aarch64-macos
+#   aiod-cli-macos-amd64   x86_64-macos
+# 左边第二列是 zig 编译器自己的 -Dtarget= 三元组（对外契约，原样保留），
+# 产物名只用 arm64 / amd64 + macos / windows / linux 这套写法。
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, arch: arm64, target: aarch64-linux-musl, runner: ubuntu-24.04-arm }
+          - { os: linux, arch: amd64, target: x86_64-linux-musl,  runner: ubuntu-latest }
+          - { os: macos, arch: arm64, target: aarch64-macos,     runner: macos-14 }
+          - { os: macos, arch: amd64, target: x86_64-macos,      runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: 构建
+        shell: bash
+        run: |
+          set -o pipefail
+          zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} 2>&1 | tee build.log
+
+      - name: 失败时上传构建日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: err-${{ matrix.os }}-${{ matrix.arch }}
+          path: build.log
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          case "${{ matrix.target }}" in *windows*) ext=".exe" ;; esac
+          out="aiod-cli-${{ matrix.os }}-${{ matrix.arch }}${ext}"
+          cp "zig-out/bin/aiod-cli${ext}" "$out"
+          ls -l "$out"
+
+      - name: macOS 临时签名
+        if: matrix.os == 'macos'
+        run: |
+          f="aiod-cli-${{ matrix.os }}-${{ matrix.arch }}"
+          codesign --force --sign - --timestamp=none "$f"
+          codesign --verify "$f"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aiod-cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            aiod-cli-${{ matrix.os }}-${{ matrix.arch }}
+            aiod-cli-${{ matrix.os }}-${{ matrix.arch }}.exe
+
+  # 产物必须在对应平台真跑一遍 version，编译通过不等于能运行
+  smoke:
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
+          - { os: linux, arch: amd64, runner: ubuntu-latest }
+          - { os: macos, arch: arm64, runner: macos-14 }
+          - { os: macos, arch: amd64, runner: macos-14 }
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aiod-cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: bin
+
+      - name: 冒烟测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la bin/
+          chmod +x "bin/aiod-cli-${{ matrix.os }}-${{ matrix.arch }}"
+          "bin/aiod-cli-${{ matrix.os }}-${{ matrix.arch }}" version
+
+  release:
+    needs: [build, smoke]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: |
+          cd dist
+          rm -f build.log
+          ls -la
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest
+          files: dist/*
+          make_latest: true

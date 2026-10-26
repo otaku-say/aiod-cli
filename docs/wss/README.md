@@ -1,0 +1,63 @@
+# tls13.zig —— 纯 Zig 手写 TLS 1.3 客户端（PoC，已跑通真实 Cloudflare）
+
+## 状态：端到端可用（2026-10-04）
+
+对 api.cloudflare.com:443 完成全流程：ClientHello -> ServerHello -> EE ->
+Certificate（3 链，ECDSA P-256）-> CertificateVerify（验签通过）-> Finished（双向校验）
+-> 加密 HTTP GET -> 读回 /cdn-cgi/trace 响应（`tls=TLSv1.3` / `kex=X25519`）。
+
+**无 fork、无 openssl 子进程、无 std.crypto.tls**（后者在 Zig 0.17 首次 flush 挂死，
+2026-10-02 的 master 也未修：Client.zig/Writer.zig/Child.zig 与 0.17 diff 为 0 行）。
+
+## 依赖的 std API（Zig 0.17，全部实测存在）
+- `std.crypto.tls.hkdfExpandLabel` / `emptyHash`（白嫖，勿自写）
+- `std.crypto.dh.X25519`（KeyPair.generateDeterministic + scalarmult）
+- `std.crypto.aead.aes_gcm.Aes128Gcm`（encrypt/decrypt）
+- `std.crypto.hash.sha2.Sha256`、`std.crypto.auth.hmac.sha2.HmacSha256`（注意是三层路径）
+- `std.crypto.Certificate.parse` / `Parsed.verifyHostName` / `Certificate.rsa.*`（PSS 验签）
+- `std.os.linux.getrandom`（无需 std.Io）
+- 记录层用裸 syscall（std.posix 在 0.17 无 socket/connect 封装）：
+  `std.os.linux.socket/connect/read/write`，`socklen_t = u32`
+
+## 踩过的坑（全部已修，勿重复）
+1. ClientHello 扩展漏写内部 vector 长度：supported_groups / signature_algorithms /
+   key_share 三个扩展的「列表长度」字段缺失 -> 服务端 decode_error(50)。
+2. ALPN 长度算错（ext_data len 与 ProtocolNameList len）。
+3. `deriveKeyIv` 先按 32 字节展开再截断 -> 密钥全错。**HKDF-Expand-Label 的输出长度
+   参与 info 计算**，必须按 cipher 真实 key 长度展开（16 就展开 16）。
+4. `writeRecord` 内层明文长度算错：把「含 tag 的长度」当明文长度 -> AEAD 加密 49 字节
+   再让 tag 覆盖最后 16 字节 -> 服务端 bad_record_mac(20)。
+5. 客户端 Finished 消息漏了 4 字节握手头（`14 00 00 20`）-> 服务端 unexpected_message(10)。
+6. **内层明文布局**：本实现对「收到」和「发出」的加密记录均按 `[内容][content_type]`
+   处理。实测 OpenSSL 3.0.2 与 Cloudflare/BoringSSL 的握手加密记录、告警记录都是这个
+   布局（我们的读方向保留了对两种布局的启发式兼容）。**改动此布局前必须在真实目标回归。**
+7. 兼容性 CCS（`14 03 03 00 01 01`）需跳过，自己也补发一条更稳。
+
+## 用法
+```
+zig build-exe tls13.zig -O ReleaseFast -femit-bin=tls13_poc
+./tls13_poc --sni api.cloudflare.com --ip <A.B.C.D> --path /cdn-cgi/trace   # 带证书校验
+./tls13_poc --sni localhost --ip 127.0.0.1 --port 8443 -k                  # 跳过主机名校验
+```
+
+## 交叉编译
+已验证：`zig build-exe tls13.zig -O ReleaseFast -target aarch64-linux-musl` 可静态编译。
+
+## 集成状态（已完成 → aiod-cli，见 feat/wss-integration 分支）
+- `src/tls13.zig`：`Conn.fd` 已抽象为 `Stream`（readFn/writeFn，socket 与
+  测试桩皆可注入）；对外 `tls13.init(.{host, port, sni, stream, insecure})` 完成握手，
+  之后 `write()/read()/closeNotify()`（明文层，内部做 TLS 记录层分帧与拆帧）；
+  调试输出默认关闭（`TrafficKeys.debug = false`），`AIO_TLS_DEBUG=1` 打开；
+  默认做主机名校验（含 IP SAN）+ CertificateVerify 验签，完整链验证暂未实现；
+  `-k` / `--insecure` 跳过主机名校验。
+- `src/ws.zig`：socket 与帧层之间插入 Transport（plain / tls 双层），
+  wss:// 时握手走 tls13；ws:// 明文路径行为不变。
+- `src/cmd_pty.zig`：SANDBOX_BASE 为 https:// 时 pty-ws / pty-ws-anon
+  自动走 wss://。
+- 已实测：沙箱内 openssl s_server（自签证书，SAN 匹配 / 不匹配 / 加 -k 三组）；
+  沙箱 → wss → 真实 Cloudflare 反代 → 沙箱网关（pty 附着 + 命令执行 + 副作用核验）；
+  aarch64-linux-musl 交叉编译通过。
+
+## 同目录附带
+- `probe.py`：用 Python 独立构造 ClientHello 逐项探测扩展（定位扩展编码 bug 用）
+- `check.py`：独立复算 X25519 / TLS1.3 key schedule / 各阶段密钥（与 Zig 输出对拍用）

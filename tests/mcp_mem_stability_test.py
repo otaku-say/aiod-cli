@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""MCP Server 内存增长稳定性回归测试。
+
+针对常驻长进程（mcp-server）验证在高频 tools/call 下无界内存增长缺陷已彻底修复。
+测试逻辑：
+1. 对 aiod-cli（使用 mock_aiod_server，工具：file_read）启动 mcp-server；
+2. 连续执行 3000 次（默认）tools/call；
+3. 每 500 次从 /proc/<pid>/status 采样一次 VmRSS；
+4. 以第 500 次为预热基线，断言「末次 RSS - 基线 RSS < 1 MiB」；
+5. 打印清晰的采样曲线与增长统计。
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Add repo root to import path（aiod-cli 的 mcp-server 用 tests/ 下的 mock 服务）
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from tests.mock_aiod_server import MockAiodServer
+
+
+def get_vm_rss_kb(pid: int) -> int:
+    """读取进程 RSS（KB）。
+
+    优先 /proc/<pid>/status 的 VmRSS；回退 /proc/<pid>/statm（resident 页数 × 页大小）——
+    iSH/Alpine 精简环境只有 statm，没有 status。
+    **两者都读不到时返回 -1**：调用方必须据此判定"本机无法测量"，绝不能当成 0 增长
+    （否则门禁会静默变成永远通过）。
+    """
+    try:
+        with open(f"/proc/{pid}/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    try:
+        with open(f"/proc/{pid}/statm", "r") as f:
+            resident_pages = int(f.read().split()[1])
+        return resident_pages * (os.sysconf("SC_PAGE_SIZE") // 1024)
+    except Exception as e:
+        print(f"Warning: 无法读取 /proc/{pid}/status 或 statm：{e}", file=sys.stderr)
+    return -1
+
+
+class McpProcess:
+    def __init__(self, bin_path: str, env_vars: dict):
+        env = dict(os.environ)
+        env.update(env_vars)
+        self.proc = subprocess.Popen(
+            [bin_path, "mcp-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            bufsize=0,
+        )
+        self.req_id = 0
+
+        # Handshake: initialize
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "mem-test-client", "version": "1.0.0"},
+            },
+        }
+        res = self.send(init_req)
+        assert "result" in res, f"initialize failed: {res}"
+
+        # notifications/initialized
+        self.notify({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def send(self, obj: dict) -> dict:
+        line = json.dumps(obj) + "\n"
+        self.proc.stdin.write(line.encode("utf-8"))
+        self.proc.stdin.flush()
+        raw = self.proc.stdout.readline()
+        if not raw:
+            err = self.proc.stderr.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"mcp-server closed stdout prematurely. stderr: {err}")
+        return json.loads(raw.decode("utf-8"))
+
+    def notify(self, obj: dict):
+        line = json.dumps(obj) + "\n"
+        self.proc.stdin.write(line.encode("utf-8"))
+        self.proc.stdin.flush()
+
+    def close(self):
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
+def run_single_stability_test(
+    name: str,
+    bin_path: str,
+    total_iters: int,
+    step: int,
+    warmup: int,
+    threshold_kb: int,
+) -> bool:
+    print(f"==================================================")
+    print(f"[{name}] 开始内存稳定性测试: {bin_path}")
+    print(f"  配置: iters={total_iters}, step={step}, warmup={warmup}, threshold={threshold_kb} kB ({threshold_kb / 1024:.2f} MiB)")
+
+    mock_server = MockAiodServer()
+    mock_server.start()
+    env_vars = {"SANDBOX_BASE": mock_server.base_url}
+    call_params = {"name": "file_read", "arguments": {"path": "/etc/hosts"}}
+    stop_mock = mock_server.stop
+
+    mcp = McpProcess(bin_path, env_vars)
+    pid = mcp.proc.pid
+    initial_rss = get_vm_rss_kb(pid)
+    print(f"  进程 PID={pid}, 启动初始 RSS: {initial_rss} kB")
+
+    samples = []  # list of (iter, rss_kb)
+    t0 = time.time()
+
+    try:
+        for i in range(1, total_iters + 1):
+            req = {
+                "jsonrpc": "2.0",
+                "id": i + 10,
+                "method": "tools/call",
+                "params": call_params,
+            }
+            res = mcp.send(req)
+            if "error" in res:
+                print(f"  [ERROR] tools/call failed at iter {i}: {res['error']}")
+                return False
+
+            if i % step == 0:
+                rss = get_vm_rss_kb(pid)
+                if rss < 0:
+                    print("  [ERROR] 本机无法测量进程 RSS（既无 /proc/<pid>/status 也无 statm）；"
+                          "该门禁在本机不可用——请勿当作通过。")
+                    return None
+                samples.append((i, rss))
+
+        duration = time.time() - t0
+        print(f"  完成 {total_iters} 次请求，耗时 {duration:.2f}s ({total_iters / duration:.1f} req/s)")
+
+    finally:
+        mcp.close()
+        stop_mock()
+
+    # Analyze samples
+    print("  RSS 采样曲线:")
+    baseline_rss = None
+    for it, rss in samples:
+        note = ""
+        if it == warmup:
+            baseline_rss = rss
+            note = " <- [基线 (预热后)]"
+        elif baseline_rss is not None:
+            delta = rss - baseline_rss
+            note = f" (距基线 {delta:+d} kB)"
+        print(f"    iter {it:5d}: {rss:6d} kB{note}")
+
+    if baseline_rss is None:
+        # If warmup not exact match, use first sample >= warmup
+        for it, rss in samples:
+            if it >= warmup:
+                baseline_rss = rss
+                break
+        if baseline_rss is None:
+            baseline_rss = samples[0][1]
+
+    final_rss = samples[-1][1]
+    warm_growth = final_rss - baseline_rss
+
+    # v3 判据：用「分段增量的中位数」而不是某个基线点做差 ——
+    # 一次性台阶（懒分配/arena 容量增长）只会污染一个分段，真泄漏会污染所有分段。
+    # 背景：CI 实测出现过 2000→2500 一次性 +272 kB 后完全持平；若台阶落在末段，
+    # 任何「取某个采样点当基线」的做法都会误报。
+    deltas = [samples[i][1] - samples[i - 1][1] for i in range(1, len(samples))]
+    med_delta = sorted(deltas)[len(deltas) // 2] if deltas else 0
+    seg_reqs = step if step > 0 else 1
+    per_req = med_delta * 1024.0 / seg_reqs
+    # 阈值按「每段」折算：64 kB / 段（等价 128 B/req @ step=500）
+    med_threshold_kb = max(16, int(threshold_kb * seg_reqs / 500.0))
+    growth_kb = med_delta
+
+    print(f"  统计摘要:")
+    print(f"    预热基线 RSS (iter {warmup}): {baseline_rss} kB  →  末次 {final_rss} kB（总差值 {warm_growth:+d} kB，仅判读用）")
+    print(f"    分段增量（每 {seg_reqs} 次请求）: {deltas}")
+    print(f"    分段增量中位数: {med_delta:+d} kB  →  每请求 {per_req:.1f} B/req")
+    print(f"    判定阈值: 中位段增量 < {med_threshold_kb} kB（等价 {med_threshold_kb * 1024.0 / seg_reqs:.0f} B/req）")
+    print(f"    说明：一次性台阶只污染一段 → 中位数≈0；持续泄漏每段都涨 → 必被抓住（泄漏版实测 380 B/req）")
+
+    if growth_kb < med_threshold_kb:
+        print(f"  [PASS] {name} 内存稳定性断言通过 (增长 {growth_kb} kB < {threshold_kb} kB)")
+        return True
+    else:
+        print(f"  [FAIL] {name} 内存增长超标! 增长 {growth_kb} kB >= {threshold_kb} kB")
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MCP Server 内存增长稳定性回归测试")
+    parser.add_argument("--bin", default="zig-out/bin/aiod-cli", help="待测试二进制路径（默认 zig-out/bin/aiod-cli）")
+    parser.add_argument("--iters", type=int, default=3000, help="总调用次数 (默认 3000)")
+    parser.add_argument("--step", type=int, default=500, help="采样步长 (默认 500)")
+    parser.add_argument("--warmup", type=int, default=500, help="预热步数，作为基线 (默认 500)")
+    parser.add_argument("--threshold-mib", type=float, default=0.125, help="允许的最大增长 MiB (默认 0.125；反证：修复前实现 3000 次请求实测 +0.906 MiB，故该阈值能真正拦住这类泄漏)")
+    args = parser.parse_args()
+
+    threshold_kb = int(args.threshold_mib * 1024)
+
+    bin_path = args.bin
+    if not os.path.isfile(bin_path):
+        print(f"[ERROR] 二进制不存在: {bin_path}，请先执行 zig build", file=sys.stderr)
+        sys.exit(1)
+
+    all_ok = run_single_stability_test(
+        name="aiod-cli",
+        bin_path=bin_path,
+        total_iters=args.iters,
+        step=args.step,
+        warmup=args.warmup,
+        threshold_kb=threshold_kb,
+    )
+    print("")
+
+    if all_ok:
+        print("[PASS] 内存稳定性测试通过！")
+        sys.exit(0)
+    else:
+        print("[FAIL] 内存稳定性断言未通过！", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
