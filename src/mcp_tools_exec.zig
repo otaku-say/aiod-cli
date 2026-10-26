@@ -104,6 +104,7 @@ fn tExecLogs(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
         .wait_timeout = wait_timeout,
     }) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     const rendered = renderRun(srv, body) catch body;
@@ -115,6 +116,7 @@ fn tExecKill(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const sig = try a.strOpt(srv.arena, "signal");
     const body = sdk_exec.kill(srv.sdk, cid, sig) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     const text = std.fmt.allocPrint(srv.arena, "killed {s}\n{s}", .{ cid, body }) catch "killed";
@@ -127,6 +129,7 @@ fn tExecStdin(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const enter = (a.boolOpt(srv.arena, "enter") catch return srv.argError(a)) orelse false;
     const body = sdk_exec.stdin(srv.sdk, cid, text, enter) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(if (body.len > 0) body else "ok");
@@ -155,6 +158,7 @@ fn tSessionDelete(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const sid = a.str(srv.arena, "session_id") catch return srv.argError(a);
     const body = sdk_exec.sessionDelete(srv.sdk, sid) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     const text = std.fmt.allocPrint(srv.arena, "removed {s}\n{s}", .{ sid, body }) catch "removed";

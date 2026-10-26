@@ -172,6 +172,7 @@ pub fn tabNew(self: *Sdk, url: ?[]const u8) ![]const u8 {
 
 /// POST /v2/browser/tabs/<id>
 pub fn tabUse(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/browser/tabs/{s}", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.POST, path, "{}", buf);
@@ -180,6 +181,7 @@ pub fn tabUse(self: *Sdk, id: []const u8) ![]const u8 {
 
 /// DELETE /v2/browser/tabs/<id>
 pub fn tabClose(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/browser/tabs/{s}", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.DELETE, path, null, buf);

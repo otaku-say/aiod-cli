@@ -14,13 +14,16 @@
 const std = @import("std");
 const tls13 = @import("tls13.zig");
 
+pub const OP_CONT: u8 = 0x0; // 分片续帧
 pub const OP_TEXT: u8 = 0x1;
 pub const OP_BINARY: u8 = 0x2;
 pub const OP_CLOSE: u8 = 0x8;
 pub const OP_PING: u8 = 0x9;
 pub const OP_PONG: u8 = 0xA;
 
-pub const max_frame: usize = 64 << 10; // 读缓冲 rbuf 仅 64 KiB；单帧 payload 实际上限还要减帧头。
+// 读缓冲 rbuf 只有 64 KiB，还要放帧头（最长 10 字节）+ 掩码（4 字节）；
+// 上限必须与之一致，否则 len 通过检查但 ensure() 必然 FrameTooLarge。
+pub const max_frame: usize = (64 << 10) - 14;
 const ws_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 // ---------------- 传输层：plain socket / TLS ----------------

@@ -32,7 +32,7 @@ fn toSdk(c: *Ctx) sdkmod.Sdk {
 }
 
 fn fail(c: *Ctx, res: httpc.Response) !void {
-    try c.out.print("HTTP {d}: {s}\n", .{ res.status, res.body });
+    try c.err.print("HTTP {d}: {s}\n", .{ res.status, res.body });
     return error.HttpError;
 }
 
@@ -176,7 +176,7 @@ fn cmdTabs(c: *Ctx, cmd: []const u8, a: util.Args) !void {
     if (std.mem.eql(u8, cmd, "br-tabs")) {
         var sdk = toSdk(c);
         const body = sdk_browser.tabs(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -191,6 +191,11 @@ fn cmdTabs(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         return;
     }
     const id = a.at(0) orelse return error.MissingArg;
+    // 标签 id 会拼进 URL 路径；非创建入口也校验（含 '..' 穿越）
+    if (!sdkmod.validId(id)) {
+        try c.err.print("标签id 非法：{s}（只能包含字母、数字和 . _ -）\n", .{id});
+        return error.BadId;
+    }
     const path = try std.fmt.allocPrint(c.arena, "/v2/browser/tabs/{s}", .{id});
     if (std.mem.eql(u8, cmd, "br-tab-use")) {
         const buf = try c.arena.alloc(u8, BUF);
@@ -344,7 +349,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "br-info")) {
         var sdk = toSdk(c);
         const body = sdk_browser.info(&sdk) catch {
-            try c.out.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
+            try c.err.print("HTTP {d}: {s}\n", .{ sdk.last_status, sdk.last_body });
             return error.HttpError;
         };
         try c.out.print("{s}\n", .{body});
@@ -353,9 +358,26 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
     if (eq(cmd, "br-config")) {
         if (a.get("resolution")) |v| {
             // WxH（如 1280x800）→ {"resolution":{"width":W,"height":H}}
+            // 必须解析成正整数再拼：否则 -1x0、1"x2 这类输入能拼进 JSON
+            const msg = "无效的分辨率：{s}（需为 WxH 正整数，如 1280x800）\n";
             const xi = std.mem.indexOfScalar(u8, v, 'x') orelse
-                std.mem.indexOfScalar(u8, v, 'X') orelse return error.BadArg;
-            const body = try std.fmt.allocPrint(c.arena, "{{\"resolution\":{{\"width\":{s},\"height\":{s}}}}}", .{ v[0..xi], v[xi + 1 ..] });
+                std.mem.indexOfScalar(u8, v, 'X') orelse {
+                try c.err.print(msg, .{v});
+                return error.BadArg;
+            };
+            const wpx = std.fmt.parseInt(u32, v[0..xi], 10) catch {
+                try c.err.print(msg, .{v});
+                return error.BadArg;
+            };
+            const hpx = std.fmt.parseInt(u32, v[xi + 1 ..], 10) catch {
+                try c.err.print(msg, .{v});
+                return error.BadArg;
+            };
+            if (wpx == 0 or hpx == 0) {
+                try c.err.print(msg, .{v});
+                return error.BadArg;
+            }
+            const body = try std.fmt.allocPrint(c.arena, "{{\"resolution\":{{\"width\":{d},\"height\":{d}}}}}", .{ wpx, hpx });
             try postJ(c, "/v2/browser/config", body);
         } else if (a.get("json")) |j| {
             try postJ(c, "/v2/browser/config", j);

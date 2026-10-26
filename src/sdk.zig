@@ -120,6 +120,8 @@ pub fn trimSlash(s: []const u8) []const u8 {
 /// 会话 ID 会拼进 URL 路径；只放安全字符，避免建成功后处处 404。
 pub fn validId(id: []const u8) bool {
     if (id.len == 0) return false;
+    // '.' 与 '..' 本身是合法字符集，但作为路径段会穿越到上一级
+    if (id[0] == '.' and (id.len == 1 or (id.len == 2 and id[1] == '.'))) return false;
     for (id) |c| {
         if (!((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
             (c >= '0' and c <= '9') or c == '.' or c == '_' or c == '-')) return false;

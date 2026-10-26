@@ -21,6 +21,7 @@ const std = @import("std");
 const ctxmod = @import("ctx.zig");
 const util = @import("util.zig");
 const httpc = @import("httpc.zig");
+const sdkmod = @import("sdk.zig");
 
 const Ctx = ctxmod.Ctx;
 const BUF = 8 << 20;
@@ -56,9 +57,20 @@ fn out(c: *Ctx, res: httpc.Response) !void {
     try c.out.print("{s}\n", .{res.body});
 }
 
+/// 会话id 会拼进 URL 路径（urlEncode 不转义 '.' 和 '/'，`..` 可穿越路径）；
+/// 创建入口与非创建入口用同一套字符集校验。
+fn idArg(c: *Ctx, a: util.Args) ![]const u8 {
+    const id = a.at(0) orelse return error.MissingArg;
+    if (!sdkmod.validId(id)) {
+        try c.err.print("会话id 非法：{s}（只能包含字母、数字和 . _ -）\n", .{id});
+        return error.BadId;
+    }
+    return id;
+}
+
 /// pty-new <会话id> [--cwd=] [--cols=] [--rows=] [--retention=]
 fn cmdNew(c: *Ctx, a: util.Args) !void {
-    const id = a.at(0) orelse return error.MissingArg;
+    const id = try idArg(c, a);
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 16 << 10));
     try w.print("{{\"id\":\"{s}\"", .{try util.jsonEscape(c.arena, id)});
     if (a.get("cwd")) |v| try w.print(",\"cwd\":\"{s}\"", .{try util.jsonEscape(c.arena, v)});
@@ -151,12 +163,10 @@ fn parseBase(base: []const u8) !BaseInfo {
 ///
 /// SANDBOX_BASE 为 https:// 时自动走 wss://（TLS 1.3 手写实现）。
 fn cmdPtyWs(c: *Ctx, anon: bool, a: util.Args) !void {
-    if (!anon) {
-        _ = a.at(0) orelse return error.MissingArg;
-    }
+    if (!anon) _ = try idArg(c, a);
 
     const info = parseBase(c.base) catch {
-        try c.out.print("无法解析 SANDBOX_BASE: {s}\n", .{c.base});
+        try c.err.print("无法解析 SANDBOX_BASE: {s}\n", .{c.base});
         return error.BadBase;
     };
 
@@ -175,9 +185,15 @@ fn cmdPtyWs(c: *Ctx, anon: bool, a: util.Args) !void {
 
     // -k / --insecure：跳过证书主机名校验（仅 wss:// 生效；自签证书调试用）
     const insecure = a.has("insecure") or hasShortFlag(a, "-k");
+    // 启用了 SANDBOX_KEY 的部署：WS 升级请求也要带鉴权头，否则 401
+    const extra_headers = if (c.key) |k|
+        try std.fmt.allocPrint(c.arena, "X-API-KEY: {s}\r\n", .{k})
+    else
+        null;
     var conn = ws.dial(c.io, info.host, info.port, ws_path, host_header, .{
         .tls = info.tls,
         .insecure = insecure,
+        .extra_headers = extra_headers,
     }) catch |e| {
         try c.out.print("WebSocket 连接失败: {t}\n", .{e});
         return e;
@@ -193,10 +209,11 @@ fn cmdPtyWs(c: *Ctx, anon: bool, a: util.Args) !void {
     }
 
     var got: usize = 0;
+    var warned_cont = false;
     while (got < max_msgs) {
         const frame = conn.readFrame() catch |e| {
             if (e == error.ConnectionClosed) break;
-            try c.out.print("读取帧失败: {t}\n", .{e});
+            try c.err.print("读取帧失败: {t}\n", .{e});
             break;
         };
         switch (frame.opcode) {
@@ -243,6 +260,13 @@ fn cmdPtyWs(c: *Ctx, anon: bool, a: util.Args) !void {
                 try c.out.print("{s}", .{frame.payload});
                 try c.out.flush();
                 got += 1;
+            },
+            ws.OP_CONT => {
+                // 分片续帧尚未重组（独立改造）：至少提示一次，不静默丢终端输出
+                if (!warned_cont) {
+                    warned_cont = true;
+                    try c.err.print("[pty-ws] 收到分片续帧（opcode 0x0），本实现不重组分片，输出可能缺段；可用 pty-screen 对照\n", .{});
+                }
             },
             else => {},
         }
@@ -296,21 +320,22 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
         return true;
     }
     if (eq(cmd, "pty-info")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         try cmdGet(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{try util.urlEncode(c.arena, id)}));
         return true;
     }
     if (eq(cmd, "pty")) {
+        _ = try idArg(c, a);
         try cmdExec(c, a);
         return true;
     }
     if (eq(cmd, "pty-screen")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         try cmdGet(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/screen", .{try util.urlEncode(c.arena, id)}));
         return true;
     }
     if (eq(cmd, "pty-input")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         const text = a.at(1) orelse "";
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 64 << 10));
         try w.print("{{\"input\":\"{s}\",\"press_enter\":{s}}}", .{
@@ -321,14 +346,14 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
         return true;
     }
     if (eq(cmd, "pty-signal")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         const sig = a.get("signal") orelse (a.at(1) orelse "SIGINT");
         const body = try std.fmt.allocPrint(c.arena, "{{\"signal\":\"{s}\"}}", .{try util.jsonEscape(c.arena, sig)});
         try cmdSend(c, try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}/signal", .{try util.urlEncode(c.arena, id)}), body, .POST);
         return true;
     }
     if (eq(cmd, "pty-resize")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 4096));
         try w.print("{{", .{});
         var first = true;
@@ -350,7 +375,7 @@ pub fn dispatch(c: *Ctx, cmd: []const u8, argv: []const []const u8) !bool {
         return true;
     }
     if (eq(cmd, "pty-rm")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         const buf = try c.arena.alloc(u8, BUF);
         const res = try httpc.del(c.client, try c.url(try std.fmt.allocPrint(c.arena, "/v2/pty/sessions/{s}", .{try util.urlEncode(c.arena, id)})), try auth(c), buf);
         try util.checkResp(c, res);

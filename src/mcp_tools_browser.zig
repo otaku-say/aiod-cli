@@ -125,6 +125,7 @@ fn tBrowserTabUse(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const tid = a.str(srv.arena, "tab_id") catch return srv.argError(a);
     const body = sdk_browser.tabUse(srv.sdk, tid) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -134,6 +135,7 @@ fn tBrowserTabClose(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const tid = a.str(srv.arena, "tab_id") catch return srv.argError(a);
     const body = sdk_browser.tabClose(srv.sdk, tid) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -204,6 +206,7 @@ fn tBrowserConfig(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
             std.mem.indexOfScalar(u8, v, 'X') orelse return ToolResult.err("参数错误：分辨率格式需为 WxH（如 1280x800）");
         const wpx = std.fmt.parseInt(i64, v[0..xi], 10) catch return ToolResult.err("参数错误：分辨率格式需为 WxH（如 1280x800）");
         const hpx = std.fmt.parseInt(i64, v[xi + 1 ..], 10) catch return ToolResult.err("参数错误：分辨率格式需为 WxH（如 1280x800）");
+        if (wpx <= 0 or hpx <= 0) return ToolResult.err("参数错误：分辨率需为正整数，如 1280x800");
         break :blk try std.fmt.allocPrint(srv.arena, "{{\"resolution\":{{\"width\":{d},\"height\":{d}}}}}", .{ wpx, hpx });
     } else if (a.jsonOpt("json")) |j| try argmod.Args.jsonText(srv.arena, j) else null;
     const body_res = (if (payload) |p| sdk_browser.configSet(srv.sdk, p) else sdk_browser.configGet(srv.sdk)) catch |e| return switch (e) {

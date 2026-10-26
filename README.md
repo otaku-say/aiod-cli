@@ -247,6 +247,9 @@ musl libc 会自动跳过这类地址，所以同一台机器上 `curl` 一切�
 | `src/ws.zig`、`src/tls13.zig` | `pty-ws` 的 WebSocket / 手写 TLS 1.3 传输层（PoC 记录见 `docs/wss/`） |
 | `src/sdk*.zig`、`src/mcp*.zig` | aiod v2 端点封装与 MCP 工具层 |
 
+> 注意：`pty-ws` / `pty-ws-anon` 的 `wss://` 目前只校验证书主机名，不验证 CA 证书链
+> （自签证书也能连接），存在中间人风险；请勿在不可信网络中使用。
+
 ### 开发约定（**重要**）
 
 每个 `cmd_*.zig` 只导出一个入口：

@@ -41,6 +41,7 @@ fn tPtyScreen(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const sid = a.str(srv.arena, "session_id") catch return srv.argError(a);
     const body = sdk_pty.screen(srv.sdk, sid) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -56,6 +57,7 @@ fn tPtyExec(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
         .timeout = timeout,
     }) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -67,6 +69,7 @@ fn tPtyInput(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const enter = (a.boolOpt(srv.arena, "enter") catch return srv.argError(a)) orelse false;
     const body = sdk_pty.input(srv.sdk, sid, text, enter) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -76,6 +79,7 @@ fn tPtyDelete(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const sid = a.str(srv.arena, "session_id") catch return srv.argError(a);
     const body = sdk_pty.delete(srv.sdk, sid) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     const text = std.fmt.allocPrint(srv.arena, "deleted pty session {s}\n{s}", .{ sid, body }) catch "deleted";
@@ -87,6 +91,7 @@ fn tPtySignal(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const sig = try a.strOpt(srv.arena, "signal") orelse "SIGINT";
     const body = sdk_pty.signal(srv.sdk, sid, sig) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -98,6 +103,7 @@ fn tPtyResize(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const rows = a.intOpt(srv.arena, "rows") catch return srv.argError(a);
     const body = sdk_pty.resize(srv.sdk, sid, cols, rows, null) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));

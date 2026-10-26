@@ -85,6 +85,7 @@ pub fn watchCreate(self: *Sdk, spec: WatchCreateSpec) ![]const u8 {
 
 /// GET /v2/watch/<id>/poll
 pub fn watchPoll(self: *Sdk, id: []const u8, cursor: ?[]const u8, limit: ?i64, timeout: ?i64) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, 512));
     try w.print("/v2/watch/{s}/poll", .{id});
     var first = true;
@@ -106,6 +107,7 @@ pub fn watchPoll(self: *Sdk, id: []const u8, cursor: ?[]const u8, limit: ?i64, t
 
 /// DELETE /v2/watch/<id>
 pub fn watchRm(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/watch/{s}", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.DELETE, path, null, buf);

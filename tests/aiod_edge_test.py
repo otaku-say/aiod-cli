@@ -91,6 +91,24 @@ def main():
     else:
         bad(f"可选字符串类型错误未报参数错误：{r}")
 
+    # 非创建路径的 ID 也要校验：'.'/'..' 会穿越 URL 路径段
+    srv.clear_requests()
+    r = mcp.tool("pty_screen", {"session_id": ".."})
+    leaked = [q["path"] for q in srv.requests() if "pty" in q["path"]]
+    if r["is_error"] and "参数错误" in r["text"] and not leaked:
+        ok("pty_screen 非法 session_id → 参数错误（未发请求）")
+    else:
+        bad(f"pty_screen 未拒绝 '..'：{r} leaked={leaked}")
+
+    # kill 的 signal 必须 JSON 转义（含引号也不得破坏 body）
+    srv.clear_requests()
+    mcp.tool("exec_kill", {"command_id": "c-1", "signal": 'SIG"Q'})
+    kill_body = next((q["body"] for q in srv.requests() if q["path"].endswith("/kill")), "")
+    if '"signal":"SIG\\"Q"' in kill_body:
+        ok("exec_kill signal 已 JSON 转义")
+    else:
+        bad(f"exec_kill signal 未转义：{kill_body[:200]}")
+
     mcp.close()
     srv.stop()
 

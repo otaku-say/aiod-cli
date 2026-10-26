@@ -11,6 +11,9 @@ pub const server_name = "aiod-cli";
 /// 单条工具结果的文本上限（超过则截断并标注）。
 pub const max_text_bytes: usize = 4 << 20;
 
+/// SDK 层 error.BadId 的统一工具层文案（ID 会拼进 URL 路径，只放安全字符）。
+pub const bad_id_msg = "参数错误：ID 只能包含字母、数字和 . _ -";
+
 pub const ToolResult = struct {
     text: []const u8 = "",
     /// 可选图片内容（base64）；与 text 同时返回时按 text + image 两块组织。

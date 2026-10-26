@@ -428,6 +428,7 @@ aiod-cli write —— 把本地文件（或 stdin）写进沙箱
 示例:  aiod-cli write ./data.csv /home/gem/data.csv
        echo hi | aiod-cli write - /tmp/hi.txt --append
 注意:  二进制文件请用 `put`（multipart）或 `fs-tree-put`（tar）。
+       本地文件上限 8 MiB（JSON 全文传输）；更大请用 `put`。
 ```
 
 ### get
@@ -462,6 +463,8 @@ aiod-cli put —— 上传本地文件到沙箱（二进制安全，大文件流
 注意:  文件路径 >32 MiB 自动分块上传（8 MiB/段，沙箱内 `cat` 拼接），
        规避单连接大文件中途断开；≤32 MiB 走流式单请求。stdin（`-`）
        仍需整体读入，上限 64 MiB。
+       在沙箱内执行时，网关暂存路径是 /tmp/<文件名>：源文件就在 /tmp 顶层
+       会被 move 走（源消失），本命令会直接拒绝，请先复制到其它目录再上传。
 ```
 
 ### fs-tree-put
@@ -765,6 +768,7 @@ aiod-cli pty-ws —— WebSocket 附着到 PTY 会话（非交互）
        --durable / --restore / --replay-bytes=<n>  重连参数（透传服务端）。
 示例:  aiod-cli pty-ws t1 --send='echo attached' --max=6
 注意:  wss 默认校验证书主机名（含 IP SAN）并做 CertificateVerify 验签；
+       但不验证 CA 证书链（自签证书也能连），存在中间人风险；生产环境请配合网络隔离。
        完整证书链验证暂未实现。同一会话一次只允许一个 WS 连接，异常断开后要
        换会话名或等服务端超时。
 ```

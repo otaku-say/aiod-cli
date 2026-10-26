@@ -108,7 +108,15 @@ fn cmdWrite(c: *Ctx, a: util.Args) !void {
         data = try util.readStdinBinary(c.io, c.arena, BUF);
     } else {
         const dir = std.Io.Dir.cwd();
-        data = dir.readFileAlloc(c.io, local, c.arena, .limited(BUF)) catch |e| return e;
+        data = dir.readFileAlloc(c.io, local, c.arena, .limited(BUF)) catch |e| {
+            if (e == error.StreamTooLong) {
+                // write 走 JSON 全文，无法流式；大文件必须走 put
+                try c.err.print("本地文件 {s} 超过 {d} MiB 上限，write 无法上传；请改用 put（支持大文件和分块）\n", .{ local, BUF >> 20 });
+                return error.FileTooLarge;
+            }
+            try c.err.print("读取本地文件 {s} 失败: {t}\n", .{ local, e });
+            return e;
+        };
     }
 
     // --append / --encoding / --leading-newline / --trailing-newline 透传
@@ -490,6 +498,19 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
     var fname: []const u8 = local;
     if (std.mem.lastIndexOfScalar(u8, local, '/')) |i| fname = local[i + 1 ..];
     if (std.mem.eql(u8, fname, "-")) fname = "stdin.bin";
+
+    // 网关的文件上传暂存路径是 /tmp/<文件名>。CLI 在沙箱内运行时，源文件与它是
+    // 同一个文件，随后的 /v2/fs/move 会把源文件 rename 走（源消失）。
+    // 用 realpath 比对：宿主上跑 CLI 时路径不同，不会误报。
+    if (!std.mem.eql(u8, local, "-")) {
+        if (std.Io.Dir.cwd().realPathFileAlloc(c.io, local, c.arena) catch null) |abs| {
+            const staging = try std.fmt.allocPrint(c.arena, "/tmp/{s}", .{fname});
+            if (std.mem.eql(u8, abs, staging)) {
+                try c.err.print("拒绝上传 {s}：网关暂存路径就是它自己（{s}），move 后源文件会消失；请先复制到其它目录再上传\n", .{ local, staging });
+                return error.SourceConflict;
+            }
+        }
+    }
 
     // 不加 --overwrite 时由服务端 move 失败（与 help put 的描述一致，不偷偷覆盖）
     const need_overwrite = a.has("overwrite");

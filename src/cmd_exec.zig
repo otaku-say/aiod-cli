@@ -20,6 +20,17 @@ const Ctx = ctxmod.Ctx;
 const BUF = 4 << 20;
 const BODY = 64 << 10;
 
+/// 命令/会话 id 会拼进 URL 路径（urlEncode 不转义 '.' 和 '/'）；
+/// 创建入口与非创建入口用同一套字符集校验。
+fn idArg(c: *Ctx, a: util.Args) ![]const u8 {
+    const id = a.at(0) orelse return error.MissingArg;
+    if (!sdkmod.validId(id)) {
+        try c.err.print("id 非法：{s}（只能包含字母、数字和 . _ -）\n", .{id});
+        return error.BadId;
+    }
+    return id;
+}
+
 fn toSdk(c: *Ctx) sdkmod.Sdk {
     return .{
         .arena = c.arena,
@@ -266,7 +277,7 @@ fn cmdAsync(c: *Ctx, a: util.Args) !void {
 
 /// log <command_id> —— 轮询增量读取（--follow 时循环）
 fn cmdLog(c: *Ctx, a: util.Args) !void {
-    const id = a.at(0) orelse return error.MissingArg;
+    const id = try idArg(c, a);
     const follow = a.has("follow");
     const buf = try c.arena.alloc(u8, BUF);
 
@@ -304,7 +315,7 @@ fn cmdLog(c: *Ctx, a: util.Args) !void {
 
 /// kill <command_id> [--signal=]
 fn cmdKill(c: *Ctx, a: util.Args) !void {
-    const id = a.at(0) orelse return error.MissingArg;
+    const id = try idArg(c, a);
     const sig = a.get("signal") orelse "SIGKILL";
     var sdk = toSdk(c);
     _ = sdk_exec.kill(&sdk, id, sig) catch {
@@ -320,7 +331,7 @@ fn cmdKill(c: *Ctx, a: util.Args) !void {
 
 /// stdin <command_id> <文本> [--enter]
 fn cmdStdin(c: *Ctx, a: util.Args) !void {
-    const id = a.at(0) orelse return error.MissingArg;
+    const id = try idArg(c, a);
     const text = a.at(1) orelse "";
     var sdk = toSdk(c);
     _ = sdk_exec.stdin(&sdk, id, text, a.has("enter")) catch {
@@ -364,7 +375,7 @@ fn cmdSess(c: *Ctx, cmd: []const u8, a: util.Args) !void {
         return;
     }
     if (std.mem.eql(u8, cmd, "sess-rm")) {
-        const id = a.at(0) orelse return error.MissingArg;
+        const id = try idArg(c, a);
         var sdk = toSdk(c);
         _ = sdk_exec.sessionDelete(&sdk, id) catch {
             if (sdk.last_body.len > 0) {

@@ -57,6 +57,7 @@ pub fn list(self: *Sdk) ![]const u8 {
 
 /// GET /v2/pty/sessions/<id>
 pub fn info(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/pty/sessions/{s}", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.GET, path, null, buf);
@@ -65,6 +66,7 @@ pub fn info(self: *Sdk, id: []const u8) ![]const u8 {
 
 /// GET /v2/pty/sessions/<id>/screen
 pub fn screen(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/pty/sessions/{s}/screen", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.GET, path, null, buf);
@@ -82,6 +84,7 @@ pub const ExecSpec = struct {
 
 /// POST /v2/pty/sessions/<id>/exec
 pub fn exec(self: *Sdk, spec: ExecSpec) ![]const u8 {
+    if (!sdkmod.validId(spec.id)) return error.BadId;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, (spec.command.len * 2) + 1024));
     try w.writeAll("{\"command\":\"");
     try sdkmod.esc(&w, spec.command);
@@ -100,6 +103,7 @@ pub fn exec(self: *Sdk, spec: ExecSpec) ![]const u8 {
 
 /// POST /v2/pty/sessions/<id>/input
 pub fn input(self: *Sdk, id: []const u8, text: []const u8, enter: bool) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, text.len * 2 + 256));
     try w.writeAll("{\"input\":\"");
     try sdkmod.esc(&w, text);
@@ -115,6 +119,7 @@ pub fn input(self: *Sdk, id: []const u8, text: []const u8, enter: bool) ![]const
 
 /// DELETE /v2/pty/sessions/<id>
 pub fn delete(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/pty/sessions/{s}", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.DELETE, path, null, buf);
@@ -123,6 +128,7 @@ pub fn delete(self: *Sdk, id: []const u8) ![]const u8 {
 
 /// POST /v2/pty/sessions/<id>/signal
 pub fn signal(self: *Sdk, id: []const u8, sig: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, sig.len * 2 + 128));
     try w.writeAll("{\"signal\":\"");
     try sdkmod.esc(&w, sig);
@@ -136,6 +142,7 @@ pub fn signal(self: *Sdk, id: []const u8, sig: []const u8) ![]const u8 {
 
 /// PATCH /v2/pty/sessions/<id>
 pub fn resize(self: *Sdk, id: []const u8, cols: ?i64, rows: ?i64, no_change_timeout: ?i64) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     var w = std.Io.Writer.fixed(try self.arena.alloc(u8, 256));
     try w.writeAll("{");
     var first = true;

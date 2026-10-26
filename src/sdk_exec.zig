@@ -69,6 +69,7 @@ pub const LogSpec = struct {
 
 /// GET /v2/commands/<id>?offset=...&stderr_offset=...&wait=true&wait_timeout=...
 pub fn logs(self: *Sdk, spec: LogSpec) ![]const u8 {
+    if (!sdkmod.validId(spec.command_id)) return error.BadId;
     var qbuf: [512]u8 = undefined;
     var qn: usize = 0;
     if (spec.offset) |v| {
@@ -100,16 +101,21 @@ pub fn logs(self: *Sdk, spec: LogSpec) ![]const u8 {
 
 /// POST /v2/commands/<id>/kill
 pub fn kill(self: *Sdk, command_id: []const u8, signal: ?[]const u8) ![]const u8 {
+    if (!sdkmod.validId(command_id)) return error.BadId;
     const sig = signal orelse "SIGKILL";
-    const body = try std.fmt.allocPrint(self.arena, "{{\"signal\":\"{s}\"}}", .{sig});
+    var w = std.Io.Writer.fixed(try self.arena.alloc(u8, sig.len * 2 + 128));
+    try w.writeAll("{\"signal\":\"");
+    try escaped(&w, sig);
+    try w.writeAll("\"}");
     const path = try std.fmt.allocPrint(self.arena, "/v2/commands/{s}/kill", .{command_id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
-    const res = try self.request(.POST, path, body, buf);
+    const res = try self.request(.POST, path, w.buffered(), buf);
     return self.arena.dupe(u8, res.body);
 }
 
 /// POST /v2/commands/<id>/stdin
 pub fn stdin(self: *Sdk, command_id: []const u8, text: []const u8, enter: bool) ![]const u8 {
+    if (!sdkmod.validId(command_id)) return error.BadId;
     const input_text = if (enter and (text.len == 0 or text[text.len - 1] != '\n'))
         try std.fmt.allocPrint(self.arena, "{s}\n", .{text})
     else
@@ -159,6 +165,7 @@ pub fn sessionList(self: *Sdk) ![]const u8 {
 
 /// DELETE /v2/commands/sessions/<id>
 pub fn sessionDelete(self: *Sdk, id: []const u8) ![]const u8 {
+    if (!sdkmod.validId(id)) return error.BadId;
     const path = try std.fmt.allocPrint(self.arena, "/v2/commands/sessions/{s}", .{id});
     const buf = try self.arena.alloc(u8, sdkmod.BUF);
     const res = try self.request(.DELETE, path, null, buf);

@@ -59,6 +59,7 @@ fn tWatchPoll(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
 
     const body = sdk_misc.watchPoll(srv.sdk, wid, cursor, limit, timeout) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
@@ -68,6 +69,7 @@ fn tWatchRm(srv: *Server, a: *argmod.Args) anyerror!ToolResult {
     const wid = a.str(srv.arena, "watcher_id") catch return srv.argError(a);
     const body = sdk_misc.watchRm(srv.sdk, wid) catch |e| return switch (e) {
         error.MissingConfig, error.HttpError, error.ApiError => srv.sdkError(),
+        error.BadId => ToolResult.err(types.bad_id_msg),
         else => ToolResult.err(@errorName(e)),
     };
     return ToolResult.ok(types.clampText(srv.arena, body));
