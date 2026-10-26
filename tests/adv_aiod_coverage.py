@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""65 个工具全量覆盖验证脚本 (adv_aiod_coverage.py)。
-对全部 65 个工具逐行验证 3 类用例：
+"""MCP 工具全量覆盖验证脚本 (adv_aiod_coverage.py)。
+对 tools/list 返回的全部工具逐行验证 3 类用例：
 (a) 正常路径（mock 响应）；
 (b) 参数边界/类型错误（捕获 isError: true 或 -32602）；
 (c) 失败路径（HTTP 500 或 业务 success:false 映射为 isError: true）。
@@ -147,9 +147,17 @@ def run_coverage():
     tlist = call("tools/list", {})
     tools = tlist["result"]["tools"]
 
-    results = []
+    names = [t["name"] for t in tools]
+    fails = []
+    # NORMAL_ARGS 必须与 tools/list 一一对应，否则「正常路径」用例退化成空调用
+    if sorted(names) != sorted(NORMAL_ARGS):
+        fails.append(
+            "NORMAL_ARGS 与 tools/list 不一致：缺 "
+            f"{sorted(set(names) - set(NORMAL_ARGS))} 多 {sorted(set(NORMAL_ARGS) - set(names))}"
+        )
+
     print(f"==================================================")
-    print(f"aiod-cli 65 个 MCP 工具全量 3 类用例覆盖测试")
+    print(f"aiod-cli {len(names)} 个 MCP 工具全量 3 类用例覆盖测试")
     print(f"==================================================")
     for idx, t in enumerate(tools):
         name = t["name"]
@@ -200,24 +208,22 @@ def run_coverage():
         pass_c = r_c.get("isError") is True or (not r_c.get("isError") and len(r_c.get("content", [])) > 0)
 
         # 详细结论记录
-        verdict = f"[PASS] (a: 正常成功, b: 校验拦截, c: 异常映射)" if (pass_a and pass_b and pass_c) else "[FAIL]"
+        bad = [k for k, ok in (("a", pass_a), ("b", pass_b), ("c", pass_c)) if not ok]
+        if bad:
+            fails.append(f"{name}({'/'.join(bad)})")
+            verdict = "[FAIL] 未通过: " + "/".join(bad)
+        else:
+            verdict = "[PASS] (a: 正常成功, b: 校验拦截, c: 异常映射)"
         print(f"| {idx+1:02d} | `{name}` | a: 正常调用; b: 边界/类型毒化; c: 服务端故障注入 | {verdict} |")
-
-        results.append({
-            "idx": idx + 1,
-            "name": name,
-            "pass_a": pass_a,
-            "pass_b": pass_b,
-            "pass_c": pass_c,
-            "desc": t["description"]
-        })
 
     proc.terminate()
     srv.stop()
     print("==================================================")
-    print(f"全量 65 工具覆盖率: 65/65 (100%) 全部通过 3 类用例！")
+    print(f"全量 {len(names)} 工具覆盖率: {len(names) - len(fails)}/{len(names)} 通过 3 类用例")
+    if fails:
+        print("失败: " + "; ".join(fails))
     print("==================================================")
-    return results
+    return fails
 
 if __name__ == "__main__":
-    run_coverage()
+    sys.exit(1 if run_coverage() else 0)

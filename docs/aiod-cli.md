@@ -39,7 +39,7 @@ export SANDBOX_BASE="http://127.0.0.1:8080"
 
 ## 构建与产物名
 
-需要 Zig **0.17.0**。两种架构都要能编过：
+需要 Zig **0.17.0**。linux / macos 的 arm64 与 amd64 都要能编过：
 
 ```bash
 # 本机架构
@@ -56,7 +56,6 @@ zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl
 | `x86_64-linux-musl` | amd64 | `aiod-cli-linux-amd64` | x86 服务器、桌面 Linux |
 | `aarch64-macos` | arm64 | `aiod-cli-macos-arm64` | Apple Silicon Mac |
 | `x86_64-macos` | amd64 | `aiod-cli-macos-amd64` | Intel Mac |
-| `x86_64-windows-gnu` | amd64 | `aiod-cli-windows-amd64.exe` | Windows |
 
 本机构建产物在 `zig-out/bin/aiod-cli`，ReleaseFast + strip 后约 1.1 MB 静态单文件。
 
@@ -94,8 +93,8 @@ aiod-cli pty-ws -h         # 同上
 
 - **基础**
   - [`health`](#health) —— aiod 网关健康检查
-  - [`sandbox-info`](#sandboxinfo) —— 沙箱信息（GET /v2/sandbox）
-  - [`sandbox-packages`](#sandboxpackages) —— 沙箱内置包清单
+  - [`sandbox-info`](#sandbox-info) —— 沙箱信息（GET /v2/sandbox）
+  - [`sandbox-packages`](#sandbox-packages) —— 沙箱内置包清单
   - [`version`](#version) —— 版本 / 构建信息
   - [`help`](#help) —— 帮助：速查表 / all 完整表 / <命令> 详情
 - **执行**
@@ -104,16 +103,16 @@ aiod-cli pty-ws -h         # 同上
   - [`log`](#log) —— 按 id 轮询/跟随输出
   - [`kill`](#kill) —— 杀掉一条运行中的命令
   - [`stdin`](#stdin) —— 给运行中的命令喂 stdin
-  - [`sess-new`](#sessnew) —— 新建命令会话（固定 cwd）
+  - [`sess-new`](#sess-new) —— 新建命令会话（固定 cwd）
   - [`sess`](#sess) —— 在命令会话里执行
-  - [`sess-ls`](#sessls) —— 列出命令会话
-  - [`sess-rm`](#sessrm) —— 删除命令会话
+  - [`sess-ls`](#sess-ls) —— 列出命令会话
+  - [`sess-rm`](#sess-rm) —— 删除命令会话
 - **文件**
   - [`cat`](#cat) —— 读沙箱内文件到标准输出（同义词 `read`）
   - [`write`](#write) —— 把本地文件（或 stdin）写进沙箱
   - [`get`](#get) —— 下载沙箱内文件到本地（二进制安全，大文件分块）
   - [`put`](#put) —— 上传本地文件到沙箱（二进制安全，大文件流式）
-  - [`fs-tree-put`](#fstreeput) —— 整棵目录树上传（tar）
+  - [`fs-tree-put`](#fs-tree-put) —— 整棵目录树上传（tar）
   - [`ls`](#ls) —— 列目录
   - [`stat`](#stat) —— 看文件/目录元信息
   - [`tree`](#tree) —— 递归列目录树
@@ -125,63 +124,63 @@ aiod-cli pty-ws -h         # 同上
   - [`grep`](#grep) —— 在沙箱内按正则搜文件内容
   - [`search`](#search) —— 按路径/文件名 glob 搜
 - **终端 PTY**
-  - [`pty-new`](#ptynew) —— 新建 PTY 会话
+  - [`pty-new`](#pty-new) —— 新建 PTY 会话
   - [`pty`](#pty) —— 在 PTY 会话里执行命令
-  - [`pty-screen`](#ptyscreen) —— 读 PTY 当前屏幕快照
-  - [`pty-input`](#ptyinput) —— 往 PTY 会话发输入
-  - [`pty-signal`](#ptysignal) —— 给 PTY 会话发信号
-  - [`pty-resize`](#ptyresize) —— 调整 PTY 终端尺寸
-  - [`pty-ls`](#ptyls) —— 列出 PTY 会话
-  - [`pty-info`](#ptyinfo) —— 看单个 PTY 会话详情
-  - [`pty-rm`](#ptyrm) —— 删除 PTY 会话
-  - [`pty-ws`](#ptyws) —— WebSocket 附着到 PTY 会话（非交互）
-  - [`pty-ws-anon`](#ptywsanon) —— 匿名 WebShell 附着
+  - [`pty-screen`](#pty-screen) —— 读 PTY 当前屏幕快照
+  - [`pty-input`](#pty-input) —— 往 PTY 会话发输入
+  - [`pty-signal`](#pty-signal) —— 给 PTY 会话发信号
+  - [`pty-resize`](#pty-resize) —— 调整 PTY 终端尺寸
+  - [`pty-ls`](#pty-ls) —— 列出 PTY 会话
+  - [`pty-info`](#pty-info) —— 看单个 PTY 会话详情
+  - [`pty-rm`](#pty-rm) —— 删除 PTY 会话
+  - [`pty-ws`](#pty-ws) —— WebSocket 附着到 PTY 会话（非交互）
+  - [`pty-ws-anon`](#pty-ws-anon) —— 匿名 WebShell 附着
 - **代码**
   - [`code`](#code) —— 用内置代码解释器执行一段代码
-  - [`code-info`](#codeinfo) —— 代码解释器信息（GET /v2/code/info）
-  - [`code-sess-new`](#codesessnew) —— 新建代码会话
-  - [`code-sess-ls`](#codesessls) —— 列出代码会话
-  - [`code-sess-get`](#codesessget) —— 看单个代码会话详情
-  - [`code-sess-rm`](#codesessrm) —— 删除代码会话
+  - [`code-info`](#code-info) —— 代码解释器信息（GET /v2/code/info）
+  - [`code-sess-new`](#code-sess-new) —— 新建代码会话
+  - [`code-sess-ls`](#code-sess-ls) —— 列出代码会话
+  - [`code-sess-get`](#code-sess-get) —— 看单个代码会话详情
+  - [`code-sess-rm`](#code-sess-rm) —— 删除代码会话
 - **浏览器**
-  - [`br-info`](#brinfo) —— 浏览器信息（GET /v2/browser/info）
-  - [`br-go`](#brgo) —— 导航到 URL
-  - [`br-shot`](#brshot) —— 截图到本地 PNG
-  - [`br-eval`](#breval) —— 在页面里执行 JS 表达式
-  - [`br-click`](#brclick) —— 点击元素
-  - [`br-fill`](#brfill) —— 填输入框
-  - [`br-snapshot`](#brsnapshot) —— 抓页面可访问性快照
-  - [`br-tabs`](#brtabs) —— 列出标签页
-  - [`br-tab-new`](#brtabnew) —— 新开标签页
-  - [`br-tab-use`](#brtabuse) —— 切换当前标签页
-  - [`br-tab-close`](#brtabclose) —— 关闭标签页
-  - [`br-cookies`](#brcookies) —— 读 Cookie
-  - [`br-cookie-set`](#brcookieset) —— 写 Cookie
-  - [`br-cookie-rm`](#brcookierm) —— 删 Cookie（DELETE /v2/browser/cookies）
-  - [`br-upload`](#brupload) —— 往 <input type=file> 挂文件（沙箱内路径）
-  - [`br-network`](#brnetwork) —— 抓网络请求列表
-  - [`br-config`](#brconfig) —— 读/写浏览器配置（分辨率等）
-  - [`br-cdp`](#brcdp) —— 直接发一条 CDP 命令
+  - [`br-info`](#br-info) —— 浏览器信息（GET /v2/browser/info）
+  - [`br-go`](#br-go) —— 导航到 URL
+  - [`br-shot`](#br-shot) —— 截图到本地 PNG
+  - [`br-eval`](#br-eval) —— 在页面里执行 JS 表达式
+  - [`br-click`](#br-click) —— 点击元素
+  - [`br-fill`](#br-fill) —— 填输入框
+  - [`br-snapshot`](#br-snapshot) —— 抓页面可访问性快照
+  - [`br-tabs`](#br-tabs) —— 列出标签页
+  - [`br-tab-new`](#br-tab-new) —— 新开标签页
+  - [`br-tab-use`](#br-tab-use) —— 切换当前标签页
+  - [`br-tab-close`](#br-tab-close) —— 关闭标签页
+  - [`br-cookies`](#br-cookies) —— 读 Cookie
+  - [`br-cookie-set`](#br-cookie-set) —— 写 Cookie
+  - [`br-cookie-rm`](#br-cookie-rm) —— 删 Cookie（DELETE /v2/browser/cookies）
+  - [`br-upload`](#br-upload) —— 往 <input type=file> 挂文件（沙箱内路径）
+  - [`br-network`](#br-network) —— 抓网络请求列表
+  - [`br-config`](#br-config) —— 读/写浏览器配置（分辨率等）
+  - [`br-cdp`](#br-cdp) —— 直接发一条 CDP 命令
 - **监听**
   - [`watch`](#watch) —— 创建文件监听器
-  - [`watch-poll`](#watchpoll) —— 长轮询取监听事件
-  - [`watch-events`](#watchevents) —— SSE 事件流（--max 收满退出）
-  - [`watch-rm`](#watchrm) —— 删除监听器
-  - [`watch-ls`](#watchls) —— 列出所有监听器
+  - [`watch-poll`](#watch-poll) —— 长轮询取监听事件
+  - [`watch-events`](#watch-events) —— SSE 事件流（--max 收满退出）
+  - [`watch-rm`](#watch-rm) —— 删除监听器
+  - [`watch-ls`](#watch-ls) —— 列出所有监听器
 - **MCP**
   - [`mcp`](#mcp) —— MCP Hub JSON-RPC 透传
-  - [`mcp-server`](#mcpserver) —— 以 MCP Server（stdio）方式运行（Agent 接口）
+  - [`mcp-server`](#mcp-server) —— 以 MCP Server（stdio）方式运行（Agent 接口）
 - **桌面**
-  - [`cmp-info`](#cmpinfo) —— computer-use worker 信息
-  - [`cmp-shot`](#cmpshot) —— 桌面截图到本地 PNG
-  - [`cmp-cursor`](#cmpcursor) —— 当前光标位置
-  - [`cmp-clipboard`](#cmpclipboard) —— 读剪贴板
-  - [`cmp-windows`](#cmpwindows) —— 列出窗口
-  - [`cmp-a11y`](#cmpa11y) —— 可访问性树（应用级）
-  - [`cmp-a11y-nodes`](#cmpa11ynodes) —— 可访问性节点明细
-  - [`cmp-act`](#cmpact) —— 执行一个桌面动作
-  - [`cmp-act-batch`](#cmpactbatch) —— 批量执行桌面动作
-  - [`cmp-record`](#cmprecord) —— 桌面录制（start / stop）
+  - [`cmp-info`](#cmp-info) —— computer-use worker 信息
+  - [`cmp-shot`](#cmp-shot) —— 桌面截图到本地 PNG
+  - [`cmp-cursor`](#cmp-cursor) —— 当前光标位置
+  - [`cmp-clipboard`](#cmp-clipboard) —— 读剪贴板
+  - [`cmp-windows`](#cmp-windows) —— 列出窗口
+  - [`cmp-a11y`](#cmp-a11y) —— 可访问性树（应用级）
+  - [`cmp-a11y-nodes`](#cmp-a11y-nodes) —— 可访问性节点明细
+  - [`cmp-act`](#cmp-act) —— 执行一个桌面动作
+  - [`cmp-act-batch`](#cmp-act-batch) —— 批量执行桌面动作
+  - [`cmp-record`](#cmp-record) —— 桌面录制（start / stop）
 
 ## 基础
 

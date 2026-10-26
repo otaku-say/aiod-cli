@@ -43,7 +43,9 @@ def parse_table():
 
 
 def slug(name):
-    return name.replace("-", "").replace("|", "")
+    # GitHub 锚点保留连字符：`### pty-ws` 的锚点是 #pty-ws，不是 #ptyws。
+    # 同义词 `a|b` 已在 parse_table 拆分，name 里不会有 `|`。
+    return name
 
 
 def build_doc(table):
@@ -123,7 +125,7 @@ HEAD = [
     "",
     "## 构建与产物名",
     "",
-    "需要 Zig **0.17.0**。两种架构都要能编过：",
+    "需要 Zig **0.17.0**。linux / macos 的 arm64 与 amd64 都要能编过：",
     "",
     "```bash",
     "# 本机架构",
@@ -140,7 +142,6 @@ HEAD = [
     "| `x86_64-linux-musl` | amd64 | `aiod-cli-linux-amd64` | x86 服务器、桌面 Linux |",
     "| `aarch64-macos` | arm64 | `aiod-cli-macos-arm64` | Apple Silicon Mac |",
     "| `x86_64-macos` | amd64 | `aiod-cli-macos-amd64` | Intel Mac |",
-    "| `x86_64-windows-gnu` | amd64 | `aiod-cli-windows-amd64.exe` | Windows |",
     "",
     "本机构建产物在 `zig-out/bin/aiod-cli`，ReleaseFast + strip 后约 1.1 MB 静态单文件。",
     "",

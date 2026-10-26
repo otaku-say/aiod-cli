@@ -44,13 +44,14 @@ zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl
 | `x86_64-linux-musl` | amd64 | `aiod-cli-linux-amd64` | x86 服务器、桌面 Linux |
 | `aarch64-macos` | arm64 | `aiod-cli-macos-arm64` | Apple Silicon Mac |
 | `x86_64-macos` | amd64 | `aiod-cli-macos-amd64` | Intel Mac |
-| `x86_64-windows-gnu` | amd64 | `aiod-cli-windows-amd64.exe` | Windows |
 
 左边那列是 **zig 编译器自己的目标三元组**，是 `-Dtarget=` 的对外契约，原样照抄；
-右边才是给人和发布产物用的 `<os>-<arch>` 命名（os 只有 `macos` / `windows` / `linux`，
+右边才是给人和发布产物用的 `<os>-<arch>` 命名（os 只有 `macos` / `linux`，
 arch 只有 `arm64` / `amd64`）。
 
-两种架构都必须能编过；ReleaseFast + strip 后约 1.1 MB 静态单文件。
+linux / macos 的 arm64 与 amd64 各目标都必须能编过（Windows 目标不发布：`src/ws.zig`
+走 `std.posix`、`src/tls13.zig` 走 `std.c.arc4random_buf`，zig 0.17 下编不过）；
+ReleaseFast + strip 后约 1.1 MB 静态单文件。
 
 ## 命令速查：先看 `help`
 
@@ -92,7 +93,7 @@ python3 scripts/gen-docs.py
 ### 测试
 
 ```bash
-sh tests/run_all.sh             # 一键全量：构建 → help 冒烟 → MCP 协议/纯净性 → 工具 mock → 图片边界 → 大文本 UTF-8 → 内存稳定 → 对抗覆盖
+sh tests/run_all.sh             # 一键全量：构建 → help 冒烟 → MCP 协议/纯净性 → 工具 mock → 图片边界 → 大文本 UTF-8 → 内存稳定 → 边界回归 → 对抗覆盖
 sh tests/help_smoke.sh          # 只跑帮助体系冒烟（不依赖网络）
 MEM_ITERS=1000 sh tests/run_all.sh   # 调小内存稳定测试的次数（默认 3000）
 ```
@@ -160,11 +161,15 @@ JSON-RPC 2.0 协议闭环调用沙箱能力。
 
 ### 工具分组（工具名为 `snake_case`）
 
-- **命令执行**：`exec`、`exec_async`、`exec_kill`、`exec_output`、`exec_status`
-- **文件系统**：`file_read`、`file_write`、`file_upload`、`file_download`、`file_delete`、`file_stat`、`file_move`、`file_find`、`fs_tree`、`fs_chmod`
-- **交互终端 (PTY)**：`pty_create`、`pty_write`、`pty_read`、`pty_resize`、`pty_close`
-- **浏览器自动化**：`browser_navigate`、`browser_screenshot`、`browser_click`、`browser_type`、`browser_get_text`、`browser_scroll`、`browser_page_info`、`browser_cookies_get`、`browser_cookies_set`
-- **桌面 Computer-Use**：`desktop_info`、`desktop_screenshot`、`desktop_cursor`、`desktop_clipboard`、`desktop_windows`、`desktop_a11y`、`desktop_a11y_nodes`、`desktop_act`、`desktop_act_batch`、`desktop_record`
+按 `src/mcp_tools_*.zig` 分六个域：**命令执行与会话**、**文件系统**、**PTY 终端**、
+**浏览器自动化**、**桌面与 GUI 操作**、**杂项**（代码执行 / 文件监听 / MCP Hub / 沙箱画像）。
+
+**完整工具清单不在本文件手抄**（手抄必然漂移）：一律以 `tools/list` 的实际输出为准。
+不需要沙箱也能拉：
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | aiod-cli mcp-server
+```
 
 ### stdout 纯净性承诺
 

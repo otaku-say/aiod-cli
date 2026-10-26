@@ -43,7 +43,7 @@ zig build-exe tls13.zig -O ReleaseFast -femit-bin=tls13_poc
 ## 交叉编译
 已验证：`zig build-exe tls13.zig -O ReleaseFast -target aarch64-linux-musl` 可静态编译。
 
-## 集成状态（已完成 → aiod-cli，见 feat/wss-integration 分支）
+## 集成状态（已完成 → aiod-cli，见 `src/tls13.zig`）
 - `src/tls13.zig`：`Conn.fd` 已抽象为 `Stream`（readFn/writeFn，socket 与
   测试桩皆可注入）；对外 `tls13.init(.{host, port, sni, stream, insecure})` 完成握手，
   之后 `write()/read()/closeNotify()`（明文层，内部做 TLS 记录层分帧与拆帧）；

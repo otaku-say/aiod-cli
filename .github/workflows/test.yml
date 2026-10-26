@@ -25,4 +25,6 @@ jobs:
       - name: 校验文档与 help 严格同步
         run: |
           python3 scripts/gen-docs.py
-          git diff --exit-code docs/
+          # git diff 看不见未跟踪文件，先 add 再比对暂存区
+          git add -A docs/
+          git diff --cached --exit-code docs/
