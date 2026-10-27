@@ -499,18 +499,10 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
     if (std.mem.lastIndexOfScalar(u8, local, '/')) |i| fname = local[i + 1 ..];
     if (std.mem.eql(u8, fname, "-")) fname = "stdin.bin";
 
-    // 网关的文件上传暂存路径是 /tmp/<文件名>。CLI 在沙箱内运行时，源文件与它是
-    // 同一个文件，随后的 /v2/fs/move 会把源文件 rename 走（源消失）。
-    // 用 realpath 比对：宿主上跑 CLI 时路径不同，不会误报。
-    if (!std.mem.eql(u8, local, "-")) {
-        if (std.Io.Dir.cwd().realPathFileAlloc(c.io, local, c.arena) catch null) |abs| {
-            const staging = try std.fmt.allocPrint(c.arena, "/tmp/{s}", .{fname});
-            if (std.mem.eql(u8, abs, staging)) {
-                try c.err.print("拒绝上传 {s}：网关暂存路径就是它自己（{s}），move 后源文件会消失；请先复制到其它目录再上传\n", .{ local, staging });
-                return error.SourceConflict;
-            }
-        }
-    }
+    // multipart 的 filename 决定服务端暂存路径（/tmp/<filename>）。用独立名字而不是
+    // 源文件名：CLI 在沙箱内运行时两者会指向同一个文件，随后的 /v2/fs/move 会把源
+    // 文件 rename 走。分块上传一直就是这么做的，这里统一。
+    const part_name = try std.fmt.allocPrint(c.arena, ".aiod-put-{x}", .{std.hash.Wyhash.hash(0, remote)});
 
     // 不加 --overwrite 时由服务端 move 失败（与 help put 的描述一致，不偷偷覆盖）
     const need_overwrite = a.has("overwrite");
@@ -537,7 +529,7 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
         const data = try util.readStdinBinary(c.io, c.arena, 64 << 20);
         var w = std.Io.Writer.fixed(try c.arena.alloc(u8, data.len + 4096));
         try w.print("--{s}\r\n", .{boundary});
-        try w.print("Content-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\n", .{fname});
+        try w.print("Content-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\n", .{part_name});
         try w.print("Content-Type: application/octet-stream\r\n\r\n", .{});
         try w.writeAll(data);
         try w.print("\r\n--{s}--\r\n", .{boundary});
@@ -561,7 +553,7 @@ fn cmdPut(c: *Ctx, a: util.Args) !void {
             try putChunkedUpload(c, local, remote, st.size, hs[0..hn], boundary, buf);
             return; // 分块路径已在沙箱内完成拼接落地
         }
-        res = httpc.uploadFileMultipartRange(c.client, c.io, try c.url("/v2/fs/upload"), hs[0..hn], boundary, "file", fname, local, 0, st.size, buf) catch |e| {
+        res = httpc.uploadFileMultipartRange(c.client, c.io, try c.url("/v2/fs/upload"), hs[0..hn], boundary, "file", part_name, local, 0, st.size, buf) catch |e| {
             try c.err.print("上传 {s} 失败: {t}\n", .{ local, e });
             return e;
         };
