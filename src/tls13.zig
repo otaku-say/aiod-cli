@@ -18,8 +18,6 @@
 //! 调试输出默认关闭；`AIO_TLS_DEBUG=1` 打开。证书：默认做主机名校验 +
 //! CertificateVerify 验签；完整链验证暂未实现（失败时给出明确错误）。
 const std = @import("std");
-const builtin = @import("builtin");
-const linux = std.os.linux;
 const mem = std.mem;
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -108,12 +106,6 @@ pub const Stream = struct {
         }
     }
 };
-
-// ============================== raw syscalls ==============================
-
-fn isErr(rc: usize) bool {
-    return linux.errno(rc) != .SUCCESS;
-}
 
 // ============================== AEAD plumbing ==============================
 
@@ -205,6 +197,8 @@ fn openWith(tk: *TrafficKeys, m: []u8, c: []const u8, tag: [16]u8, ad: []const u
 pub const Conn = struct {
     /// 传输层（socket / 测试桩由调用方注入）
     stream: Stream,
+    /// 熵源（std.Io.randomSecure 跨平台）
+    io: std.Io,
     rbuf: [REC_MAX]u8 = undefined,
     rpos: usize = 0,
     rend: usize = 0,
@@ -405,14 +399,9 @@ fn hex(b: []const u8) void {
 
 // ============================== ClientHello ==============================
 
-fn randBytes(b: []u8) !void {
-    // 跨平台熵源：Linux 用 getrandom，macOS 用 arc4random_buf。
-    if (builtin.os.tag == .linux) {
-        const rc = linux.getrandom(b.ptr, b.len, 0);
-        if (linux.errno(rc) != .SUCCESS or rc != b.len) return error.NoEntropy;
-    } else {
-        std.c.arc4random_buf(b.ptr, b.len);
-    }
+fn randBytes(io: std.Io, b: []u8) !void {
+    // 跨平台熵源统一走 std.Io（Linux getrandom / macOS arc4random / Windows CNG）。
+    try std.Io.randomSecure(io, b);
 }
 
 const SIG_SCHEMES = [_]u16{
@@ -429,7 +418,7 @@ const SIG_SCHEMES = [_]u16{
     0x0809, // rsa_pss_pss_sha256
 };
 
-fn buildClientHello(out: []u8, sni: ?[]const u8, kp: *const X25519.KeyPair) ![]const u8 {
+fn buildClientHello(io: std.Io, out: []u8, sni: ?[]const u8, kp: *const X25519.KeyPair) ![]const u8 {
     var i: usize = 0;
     out[i] = Hs.client_hello;
     i += 1;
@@ -439,7 +428,7 @@ fn buildClientHello(out: []u8, sni: ?[]const u8, kp: *const X25519.KeyPair) ![]c
     std.mem.writeInt(u16, out[i..][0..2], 0x0303, .big);
     i += 2; // legacy_version
     var rnd: [32]u8 = undefined;
-    try randBytes(&rnd);
+    try randBytes(io, &rnd);
     @memcpy(out[i..][0..32], &rnd);
     i += 32;
     out[i] = 0;
@@ -739,6 +728,8 @@ pub const Options = struct {
     sni: ?[]const u8 = null,
     /// 传输层读写实现（socket fd、测试桩皆可）。
     stream: Stream,
+    /// 熵源（std.Io.randomSecure 跨平台）。
+    io: std.Io,
     /// true = 跳过证书主机名校验（对应 aiod-cli 的 -k/--insecure）。
     insecure: bool = false,
     /// 覆盖调试开关；默认读环境变量 AIO_TLS_DEBUG。
@@ -765,6 +756,7 @@ pub fn init(opts: Options) !*Conn {
     const c = try gpa.create(Conn);
     errdefer gpa.destroy(c);
     c.stream = opts.stream;
+    c.io = opts.io;
     c.rpos = 0;
     c.rend = 0;
     c.hsp = 0;
@@ -791,11 +783,11 @@ fn handshake(c: *Conn, opts: Options) !void {
 
     // --- X25519 keypair（getrandom 播种）---
     var seed: [32]u8 = undefined;
-    try randBytes(&seed);
+    try randBytes(c.io, &seed);
     const kp = X25519.KeyPair.generateDeterministic(seed);
 
     var ch_buf: [1024]u8 = undefined;
-    const ch = try buildClientHello(&ch_buf, sni_send, &kp);
+    const ch = try buildClientHello(c.io, &ch_buf, sni_send, &kp);
     c.transcriptAppend(ch);
     try c.writeRecord(RecType.handshake, ch);
     dg("[tls] -> ClientHello ({d} bytes, x25519 key_share)\n", .{ch.len});

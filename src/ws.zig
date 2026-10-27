@@ -28,20 +28,20 @@ const ws_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 // ---------------- 传输层：plain socket / TLS ----------------
 
-/// socket fd ⇄ tls13.Stream 适配器（裸 syscall；musl 静态环境可用）。
+/// std.Io.net.Stream ⇄ tls13.Stream 适配器（走 std.Io，Windows/Linux/macOS 同一套）。
 const FdStream = struct {
-    fd: std.posix.fd_t,
+    io: std.Io,
+    stream: std.Io.net.Stream,
 
     fn readFn(ctx: ?*anyopaque, buf: []u8) anyerror!usize {
         const self: *FdStream = @ptrCast(@alignCast(ctx.?));
-        return std.posix.read(self.fd, buf) catch return error.ReadFailed;
+        return readSomeStream(self.stream, self.io, buf) catch return error.ReadFailed;
     }
 
     fn writeFn(ctx: ?*anyopaque, buf: []const u8) anyerror!usize {
         const self: *FdStream = @ptrCast(@alignCast(ctx.?));
-        const n = std.c.write(self.fd, buf.ptr, buf.len);
-        if (n < 0) return error.WriteFailed;
-        return @intCast(n);
+        writeStreamAll(self.stream, self.io, buf) catch return error.WriteFailed;
+        return buf.len;
     }
 };
 
@@ -49,19 +49,16 @@ const Transport = union(enum) {
     plain: std.Io.net.Stream,
     tls: *tls13.Conn,
 
-    fn readSome(t: Transport, buf: []u8) !usize {
+    fn readSome(t: Transport, io: std.Io, buf: []u8) !usize {
         switch (t) {
-            .plain => |s| {
-                const fd = s.socket.handle;
-                return std.posix.read(fd, buf);
-            },
+            .plain => |s| return readSomeStream(s, io, buf),
             .tls => |c| return c.read(buf),
         }
     }
 
-    fn writeAll(t: Transport, data: []const u8) !void {
+    fn writeAll(t: Transport, io: std.Io, data: []const u8) !void {
         switch (t) {
-            .plain => |s| return writeAllFd(s.socket.handle, data),
+            .plain => |s| return writeStreamAll(s, io, data),
             .tls => |c| return c.write(data),
         }
     }
@@ -119,7 +116,7 @@ pub const Conn = struct {
                 self.rpos = 0;
             }
             if (self.rlen >= self.rbuf.len) return error.FrameTooLarge;
-            const n = self.transport.readSome(self.rbuf[self.rlen..]) catch |e| {
+            const n = self.transport.readSome(self.io, self.rbuf[self.rlen..]) catch |e| {
                 std.debug.print("[diag] read err: {t}\n", .{e});
                 return e;
             };
@@ -195,8 +192,8 @@ pub const Conn = struct {
         defer std.heap.smp_allocator.free(masked_body);
         for (payload, 0..) |byte, i| masked_body[i] = byte ^ mask[i % 4];
 
-        try self.transport.writeAll(hdr[0..n]);
-        try self.transport.writeAll(masked_body);
+        try self.transport.writeAll(self.io, hdr[0..n]);
+        try self.transport.writeAll(self.io, masked_body);
     }
 
     pub fn sendText(self: *Conn, text: []const u8) !void {
@@ -204,18 +201,20 @@ pub const Conn = struct {
     }
 };
 
-/// 向 socket fd 写全部字节（0.17 的 Stream 没有 write，用裸 syscall）。
-fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
-    var off: usize = 0;
-    while (off < data.len) {
-        const n = std.c.write(fd, data.ptr + off, data.len - off);
-        if (n < 0) {
-            if (n == -4) continue; // EINTR: Linux 与 macOS 同为 4
-            return error.WriteFailed;
-        }
-        if (n == 0) return error.WriteFailed;
-        off += @intCast(n);
-    }
+/// 从 socket 读一次（0.17 的 Stream.read 有解构缺陷，用 readWithControl）。
+fn readSomeStream(stream: std.Io.net.Stream, io: std.Io, buf: []u8) !usize {
+    var iov: [1][]u8 = .{buf};
+    var no_control: [0]u8 = .{};
+    const res = try stream.readWithControl(io, &iov, &no_control);
+    return res.data_len;
+}
+
+/// 向 socket 写全部字节（0.17 的 Stream 没有 write 方法，走 Writer）。
+fn writeStreamAll(stream: std.Io.net.Stream, io: std.Io, data: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = stream.writer(io, &buf);
+    try w.interface.writeAll(data);
+    try w.interface.flush();
 }
 
 /// IP 字面量优先（与旧版行为一致）；域名走 std.Io 解析（含 netfix 的 hook）。
@@ -259,13 +258,14 @@ pub fn dial(
 
     if (opts.tls) {
         const f = try std.heap.smp_allocator.create(FdStream);
-        f.* = .{ .fd = stream.socket.handle };
+        f.* = .{ .io = io, .stream = stream };
         fds_box = f;
         tls_conn = tls13.init(.{
             .host = host,
             .port = port,
             .sni = opts.sni,
             .stream = .{ .ctx = f, .readFn = FdStream.readFn, .writeFn = FdStream.writeFn },
+            .io = io,
             .insecure = opts.insecure,
         }) catch |e| {
             std.debug.print("[ws] TLS 握手失败: {t}\n", .{e});
@@ -291,14 +291,14 @@ pub fn dial(
     );
     defer std.heap.smp_allocator.free(req);
 
-    try tport.writeAll(req);
+    try tport.writeAll(io, req);
 
     // 读响应头到 \r\n\r\n
     var resp: [4096]u8 = undefined;
     var rlen: usize = 0;
     var hdr_end: usize = 0;
     while (rlen < resp.len) {
-        const n = try tport.readSome(resp[rlen..]);
+        const n = try tport.readSome(io, resp[rlen..]);
         if (n == 0) return error.ConnectionClosed;
         rlen += n;
         if (std.mem.indexOf(u8, resp[0..rlen], "\r\n\r\n")) |he| {

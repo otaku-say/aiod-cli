@@ -10,6 +10,8 @@ on:
 #   aiod-cli-linux-amd64   x86_64-linux-musl
 #   aiod-cli-macos-arm64   aarch64-macos
 #   aiod-cli-macos-amd64   x86_64-macos
+#   aiod-cli-windows-arm64.exe  aarch64-windows-gnu  （仅编译校验，无 arm64 Windows runner）
+#   aiod-cli-windows-amd64.exe  x86_64-windows-gnu  （ubuntu 交叉编译，windows-latest 上跑 smoke）
 # 左边第二列是 zig 编译器自己的 -Dtarget= 三元组（对外契约，原样保留），
 # 产物名只用 arm64 / amd64 + macos / windows / linux 这套写法。
 
@@ -24,6 +26,8 @@ jobs:
           - { os: linux, arch: amd64, target: x86_64-linux-musl,  runner: ubuntu-latest }
           - { os: macos, arch: arm64, target: aarch64-macos,     runner: macos-14 }
           - { os: macos, arch: amd64, target: x86_64-macos,      runner: macos-14 }
+          - { os: windows, arch: arm64, target: aarch64-windows-gnu, runner: ubuntu-latest }
+          - { os: windows, arch: amd64, target: x86_64-windows-gnu,  runner: ubuntu-latest }
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +84,7 @@ jobs:
           - { os: linux, arch: amd64, runner: ubuntu-latest }
           - { os: macos, arch: arm64, runner: macos-14 }
           - { os: macos, arch: amd64, runner: macos-14 }
+          - { os: windows, arch: amd64, runner: windows-latest }
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -91,11 +96,92 @@ jobs:
         run: |
           set -euo pipefail
           ls -la bin/
-          chmod +x "bin/aiod-cli-${{ matrix.os }}-${{ matrix.arch }}"
-          "bin/aiod-cli-${{ matrix.os }}-${{ matrix.arch }}" version
+          f="bin/aiod-cli-${{ matrix.os }}-${{ matrix.arch }}"
+          case "${{ matrix.os }}" in windows) f="$f.exe" ;; esac
+          chmod +x "$f" 2>/dev/null || true
+          "$f" version
+
+  # 跨平台功能测试：编译通过不等于能跑。三个 OS 各自原生构建，跑同一个 Python
+  # 测试套件（mock 网关 + MCP 协议 + WebSocket 端到端）。macOS / Windows 的产物
+  # 只有在这里才真正被执行过，尤其 ws 自写传输层只有这条链路能验证。
+  func:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   runner: ubuntu-latest }
+          - { os: macos,   runner: macos-14 }
+          - { os: windows, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 原生构建
+        shell: bash
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: CLI 冒烟（version / help / 未知命令退出码）
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
+          bin="zig-out/bin/aiod-cli$ext"
+          ls -l "$bin"
+          "$bin" version
+          "$bin" help > /dev/null
+          "$bin" help all > /dev/null
+          if "$bin" definitely-not-a-command > /dev/null 2>&1; then
+            echo "未知命令返回 0（应为非 0）"
+            exit 1
+          fi
+
+      - name: MCP 协议与 stdout 纯净性
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
+          python tests/mcp_protocol_test.py --bin "zig-out/bin/aiod-cli$ext" --tools-min 65
+
+      - name: MCP 工具行为（mock 网关）
+        shell: bash
+        run: |
+          ext=""
+          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
+          python tests/mcp_aiod_tools_test.py --bin "zig-out/bin/aiod-cli$ext"
+
+      - name: 大输出截断与 UTF-8 边界
+        shell: bash
+        run: |
+          ext=""
+          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
+          python tests/mcp_big_output_test.py --bin "zig-out/bin/aiod-cli$ext"
+
+      - name: 图片类工具结果边界
+        shell: bash
+        run: |
+          ext=""
+          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
+          python tests/mcp_image_result_test.py --bin "zig-out/bin/aiod-cli$ext"
+
+      - name: WebSocket 端到端（pty-ws 握手 + 收发）
+        shell: bash
+        run: |
+          ext=""
+          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
+          python tests/ws_echo_test.py --bin "zig-out/bin/aiod-cli$ext"
 
   release:
-    needs: [build, smoke]
+    needs: [build, smoke, func]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

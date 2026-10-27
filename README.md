@@ -44,14 +44,15 @@ zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl
 | `x86_64-linux-musl` | amd64 | `aiod-cli-linux-amd64` | x86 服务器、桌面 Linux |
 | `aarch64-macos` | arm64 | `aiod-cli-macos-arm64` | Apple Silicon Mac |
 | `x86_64-macos` | amd64 | `aiod-cli-macos-amd64` | Intel Mac |
+| `aarch64-windows-gnu` | arm64 | `aiod-cli-windows-arm64.exe` | Windows on ARM |
+| `x86_64-windows-gnu` | amd64 | `aiod-cli-windows-amd64.exe` | Windows x64 |
 
 左边那列是 **zig 编译器自己的目标三元组**，是 `-Dtarget=` 的对外契约，原样照抄；
-右边才是给人和发布产物用的 `<os>-<arch>` 命名（os 只有 `macos` / `linux`，
+右边才是给人和发布产物用的 `<os>-<arch>` 命名（os 只有 `macos` / `windows` / `linux`，
 arch 只有 `arm64` / `amd64`）。
 
-linux / macos 的 arm64 与 amd64 各目标都必须能编过（Windows 目标不发布：`src/ws.zig`
-走 `std.posix`、`src/tls13.zig` 走 `std.c.arc4random_buf`，zig 0.17 下编不过）；
-ReleaseFast + strip 后约 1.1 MB 静态单文件。
+linux / macos / windows 的 arm64 与 amd64 各目标都必须能编过；
+ReleaseFast + strip 后 Linux/macOS 约 1.1–1.5 MB、Windows PE 约 1.6–2.0 MB，均为静态单文件。
 
 ## 命令速查：先看 `help`
 
@@ -310,3 +311,7 @@ var client: std.http.Client = .{ .allocator = gpa, .io = io };
 - 错误一律走 stderr：非 2xx、`success=false`、响应超上限截断都会转成可读错误并以非 0 退出，
   所以 `aiod-cli cat <文件> > out.txt` 的 out.txt 里不会混进错误 JSON。
 - 文档里标了「源码未实现」的选项确实没有接线，别照抄旧文档。
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。Copyright (c) 2026 otaku-say

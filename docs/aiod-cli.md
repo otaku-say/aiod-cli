@@ -39,7 +39,7 @@ export SANDBOX_BASE="http://127.0.0.1:8080"
 
 ## 构建与产物名
 
-需要 Zig **0.17.0**。linux / macos 的 arm64 与 amd64 都要能编过：
+需要 Zig **0.17.0**。linux / macos / windows 的 arm64 与 amd64 都要能编过：
 
 ```bash
 # 本机架构
@@ -56,6 +56,8 @@ zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl
 | `x86_64-linux-musl` | amd64 | `aiod-cli-linux-amd64` | x86 服务器、桌面 Linux |
 | `aarch64-macos` | arm64 | `aiod-cli-macos-arm64` | Apple Silicon Mac |
 | `x86_64-macos` | amd64 | `aiod-cli-macos-amd64` | Intel Mac |
+| `aarch64-windows-gnu` | arm64 | `aiod-cli-windows-arm64.exe` | Windows on ARM |
+| `x86_64-windows-gnu` | amd64 | `aiod-cli-windows-amd64.exe` | Windows x64 |
 
 本机构建产物在 `zig-out/bin/aiod-cli`，ReleaseFast + strip 后约 1.1 MB 静态单文件。
 

@@ -30,6 +30,7 @@
 //!   const io = netfix.install(gpa, threaded.io());
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const HostName = Io.net.HostName;
 const IpAddress = Io.net.IpAddress;
@@ -55,6 +56,8 @@ pub fn install(gpa: std.mem.Allocator, base: Io) Io {
 /// 与 `install` 相同，但可指定「配置文件来源路径」（测试用）。
 pub fn installFrom(gpa: std.mem.Allocator, base: Io, src_path: []const u8) Io {
     if (g_installed) return base; // 幂等：重复调用不叠加包装
+    // Windows 没有 /etc/resolv.conf（用系统 DNS API），钩子无处可装：原样返回。
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return base;
 
     const src = readAll(gpa, base, src_path) catch return base;
     defer gpa.free(src);
