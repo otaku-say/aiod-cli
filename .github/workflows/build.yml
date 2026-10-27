@@ -144,41 +144,34 @@ jobs:
             exit 1
           fi
 
-      - name: MCP 协议与 stdout 纯净性
+      - name: 功能测试套件（全部跑完再判，不早停）
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
           ext=""
           case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
-          python tests/mcp_protocol_test.py --bin "zig-out/bin/aiod-cli$ext" --tools-min 65
+          bin="zig-out/bin/aiod-cli$ext"
+          mkdir -p ci-logs
+          rc=0
+          run_suite() {
+            name="$1"; shift
+            echo "===== $name ====="
+            if "$@" 2>&1 | tee "ci-logs/$name.txt"; then echo "[PASS] $name"; else echo "[FAIL] $name"; rc=1; fi
+          }
+          run_suite protocol tests/mcp_protocol_test.py --bin "$bin" --tools-min 65
+          run_suite tools tests/mcp_aiod_tools_test.py --bin "$bin"
+          run_suite bigoutput tests/mcp_big_output_test.py --bin "$bin"
+          run_suite image tests/mcp_image_result_test.py --bin "$bin"
+          run_suite ws tests/ws_echo_test.py --bin "$bin"
+          exit $rc
 
-      - name: MCP 工具行为（mock 网关）
-        shell: bash
-        run: |
-          ext=""
-          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
-          python tests/mcp_aiod_tools_test.py --bin "zig-out/bin/aiod-cli$ext"
-
-      - name: 大输出截断与 UTF-8 边界
-        shell: bash
-        run: |
-          ext=""
-          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
-          python tests/mcp_big_output_test.py --bin "zig-out/bin/aiod-cli$ext"
-
-      - name: 图片类工具结果边界
-        shell: bash
-        run: |
-          ext=""
-          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
-          python tests/mcp_image_result_test.py --bin "zig-out/bin/aiod-cli$ext"
-
-      - name: WebSocket 端到端（pty-ws 握手 + 收发）
-        shell: bash
-        run: |
-          ext=""
-          case "${{ matrix.os }}" in windows) ext=".exe" ;; esac
-          python tests/ws_echo_test.py --bin "zig-out/bin/aiod-cli$ext"
+      - name: 上传测试日志（失败也要）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: func-logs-${{ matrix.os }}
+          path: ci-logs/*.txt
+          if-no-files-found: warn
 
   release:
     needs: [build, smoke, func]
