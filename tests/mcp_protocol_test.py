@@ -20,9 +20,9 @@
 import argparse
 import json
 import os
-import select
 import subprocess
 import sys
+import threading
 import time
 
 FAILURES = []
@@ -53,8 +53,32 @@ class Stdio:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env, bufsize=0,
         )
-        self.buf = b""
+        # 读 stdout/stderr 用后台线程而不是 select：Windows 的 select 只能等 socket，
+        # 不能等管道（会对管道抛 OSError），线程版三平台同一套代码。
+        self.buf = bytearray()
+        self.err = bytearray()
         self.lines = []
+        self.stdout_eof = False
+        self.cond = threading.Condition()
+        threading.Thread(target=self._pump, args=(self.p.stdout, self.buf, True), daemon=True).start()
+        threading.Thread(target=self._pump, args=(self.p.stderr, self.err, False), daemon=True).start()
+
+    def _pump(self, stream, sink, is_stdout):
+        """阻塞读到 EOF；每读到一块就唤醒等待者。"""
+        while True:
+            try:
+                chunk = stream.read(65536)
+            except (ValueError, OSError):
+                chunk = b""
+            if not chunk:
+                with self.cond:
+                    if is_stdout:
+                        self.stdout_eof = True
+                    self.cond.notify_all()
+                return
+            with self.cond:
+                sink += chunk
+                self.cond.notify_all()
 
     def send(self, text):
         if isinstance(text, (dict, list)):
@@ -70,18 +94,17 @@ class Stdio:
 
     def read_line(self, timeout=15.0, require_json=True):
         deadline = time.time() + timeout
-        while b"\n" not in self.buf:
-            remain = deadline - time.time()
-            if remain <= 0:
-                raise TimeoutError("等待 stdout 行超时")
-            r, _, _ = select.select([self.p.stdout], [], [], remain)
-            if not r:
-                raise TimeoutError("等待 stdout 行超时（select）")
-            chunk = os.read(self.p.stdout.fileno(), 65536)
-            if not chunk:
-                raise EOFError("stdout 已关闭")
-            self.buf += chunk
-        line, self.buf = self.buf.split(b"\n", 1)
+        with self.cond:
+            while b"\n" not in self.buf:
+                remain = deadline - time.time()
+                if remain <= 0:
+                    raise TimeoutError("等待 stdout 行超时")
+                if self.stdout_eof:
+                    raise EOFError("stdout 已关闭")
+                self.cond.wait(remain)
+            idx = self.buf.index(b"\n")
+            line = bytes(self.buf[:idx])
+            del self.buf[: idx + 1]
         text = line.decode("utf-8", "replace")
         self.lines.append(text)
         if require_json:
@@ -94,21 +117,25 @@ class Stdio:
     def expect_silence(self, seconds=1.2):
         """断言在窗口期内没有任何 stdout 输出（通知不得有响应）。"""
         end = time.time() + seconds
-        while time.time() < end:
-            remain = end - time.time()
-            r, _, _ = select.select([self.p.stdout], [], [], remain)
-            if r:
-                chunk = os.read(self.p.stdout.fileno(), 65536)
-                if chunk:
-                    self.buf += chunk
-                    return False
-        return b"\n" not in self.buf
+        with self.cond:
+            while b"\n" not in self.buf:
+                remain = end - time.time()
+                if remain <= 0:
+                    break
+                self.cond.wait(remain)
+            return b"\n" not in self.buf
 
     def stderr_text(self):
-        r, _, _ = select.select([self.p.stderr], [], [], 0.5)
-        if not r:
-            return ""
-        return os.read(self.p.stderr.fileno(), 65536).decode("utf-8", "replace")
+        end = time.time() + 0.5
+        with self.cond:
+            while not self.err:
+                remain = end - time.time()
+                if remain <= 0:
+                    return ""
+                self.cond.wait(remain)
+            text = self.err.decode("utf-8", "replace")
+            self.err.clear()
+            return text
 
     def close(self, timeout=10.0):
         try:
