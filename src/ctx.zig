@@ -24,3 +24,18 @@ pub const Ctx = struct {
         return std.fmt.allocPrint(self.arena, "{s}{s}", .{ self.base, p });
     }
 };
+
+/// 远端退出码 → 本进程退出码（与上游契约一致，两个 CLI 同一套规则）。
+///
+/// 上游 aiod 的 /v2/commands 与 CubeSandbox SDK 的 CommandResult 都直接给
+/// `exit_code: int`，所以 shell 里就该拿到同一个数字：
+///   exit_code >= 0 → 原样透传（0 = 成功）
+///   exit_code <  0 → 1（上游没给合法 shell 码，通常是 -1 = 被信号杀死）
+///   status 为 timed_out → 124（同 timeout(1)），因为它没有可透传的数字
+pub fn remoteExit(c: *Ctx, code: ?i64, status: []const u8) noreturn {
+    c.out.flush() catch {};
+    c.err.flush() catch {};
+    if (std.mem.eql(u8, status, "timed_out")) std.process.exit(124);
+    const k = code orelse 1;
+    std.process.exit(if (k >= 0) @intCast(@min(k, 255)) else 1);
+}

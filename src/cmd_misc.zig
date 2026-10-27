@@ -84,7 +84,26 @@ fn cmdCode(c: *Ctx, a: util.Args) !void {
     if (a.get("session")) |s| try w.print(",\"session_id\":\"{s}\"", .{try util.jsonEscape(c.arena, s)});
     if (try util.intFlag(c, a, "timeout")) |t| try w.print(",\"timeout\":{d}", .{t});
     try w.print("}}", .{});
-    try postJ(c, "/v2/code/execute", w.buffered());
+    const buf = try c.arena.alloc(u8, BUF);
+    const res = try httpc.postJson(c.client, try c.url("/v2/code/execute"), try jsonAuth(c), w.buffered(), buf);
+    try util.checkResp(c, res);
+    try c.out.print("{s}\n", .{res.body});
+    // 与 exec 同一套约定：解释器给了 exit_code 就透传；只给 error 对象时按失败算
+    const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch return;
+    var v = parsed.value;
+    if (v == .object) if (v.object.get("data")) |d| {
+        if (d == .object) v = d;
+    };
+    if (v != .object) return;
+    const code: ?i64 = if (v.object.get("exit_code")) |e|
+        (if (e == .integer) e.integer else null)
+    else
+        null;
+    const status: []const u8 = if (v.object.get("status")) |st| (if (st == .string) st.string else "") else "";
+    if (code == null) if (v.object.get("error") != null) {
+        if (v.object.get("error")) |e| if (e != .null) ctxmod.remoteExit(c, 1, status);
+    };
+    ctxmod.remoteExit(c, code, status);
 }
 
 /// code-sess-new [--lang=] / code-sess-ls / code-sess-rm <id>

@@ -185,8 +185,8 @@ fn cmdExecInner(c: *Ctx, a: util.Args) !void {
             try std.fmt.allocPrint(c.arena, "/v2/commands/{s}", .{id});
         const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
         try util.checkResp(c, res);
-        const code = try emit(c, res.body);
-        if (a.has("exit-code")) exitWithRemote(c, code);
+        const r = try emit(c, res.body);
+        ctxmod.remoteExit(c, r.code, r.status);
         return;
     }
 
@@ -212,31 +212,25 @@ fn cmdExecInner(c: *Ctx, a: util.Args) !void {
     const body = try runBody(c, a, command, null);
     const res = try httpc.postJson(c.client, try c.url("/v2/commands"), try jsonAuth(c), body, buf);
     try util.checkResp(c, res);
-    const code = try emit(c, res.body);
-    if (a.has("exit-code")) exitWithRemote(c, code);
+    const r = try emit(c, res.body);
+    ctxmod.remoteExit(c, r.code, r.status);
 }
 
-fn emit(c: *Ctx, json: []const u8) !?i64 {
+const Remote = struct { code: ?i64, status: []const u8 };
+
+fn emit(c: *Ctx, json: []const u8) !Remote {
     const parsed = std.json.parseFromSlice(std.json.Value, c.arena, json, .{}) catch {
         try c.out.print("{s}\n", .{json});
-        return null;
+        return .{ .code = null, .status = "" };
     };
     const v = parsed.value;
     try printOut(c, asStr(v, "stdout"), asStr(v, "stderr"));
     const code = asInt(v, "exit_code");
+    // 提示走 stderr：不能污染 `OUT=$(aiod-cli exec …)` 这类管道
     if (code) |k| {
-        if (k != 0) try c.out.print("（exit {d}）\n", .{k});
+        if (k != 0) try c.err.print("（exit {d}）\n", .{k});
     }
-    return code;
-}
-
-/// --exit-code：以沙箱内命令的退出码退出（默认行为不变：只打印「（exit N）」）。
-fn exitWithRemote(c: *Ctx, code: ?i64) noreturn {
-    c.out.flush() catch {};
-    c.err.flush() catch {};
-    const k = code orelse 1;
-    // 负数（如 -1 = 被信号杀死）按 shell 惯例映射到 1
-    std.process.exit(if (k >= 0) @intCast(@min(k, 255)) else 1);
+    return .{ .code = code, .status = asStr(v, "status") orelse "" };
 }
 
 /// async <命令> [--cwd=] [--env=] [--user=] —— 打印 command_id

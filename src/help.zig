@@ -100,7 +100,7 @@ pub const table = [_]Entry{
         \\       非 0 退出码时补一行「（exit N）」。
         \\用法:  aiod-cli exec <命令> [参数…] [--cwd=<目录>] [--shell=<壳>] [--user=<用户>]
         \\                      [--session=<会话id>] [--env=K=V,K2=V2] [--timeout=<毫秒>]
-        \\                      [--hard-timeout=<秒>] [--args='["a","b"]'] [--max-output=<字节>] [--exit-code]
+        \\                      [--hard-timeout=<秒>] [--args='["a","b"]'] [--max-output=<字节>]
         \\       aiod-cli exec --id=<command_id> [--offset=<字节>] [--stderr-offset=<字节>]
         \\                      [--wait] [--wait-timeout=<秒>]
         \\参数:  <命令> [参数…]  位置参数用空格拼成一条命令（不用自己转义引号）。
@@ -113,7 +113,6 @@ pub const table = [_]Entry{
         \\       --hard-timeout=  秒；到点服务端强杀（返回 timed_out）。
         \\       --args=       JSON 数组；仅 shell=none 时合法（argv 形式运行）。
         \\       --max-output= 截断输出上限。
-        \\       --exit-code   以沙箱内命令的退出码退出（默认只打印「（exit N）」）。
         \\       --id=         改成「按 id 回读」模式，不带位置参数。
         \\       --offset= / --stderr-offset=   回读时的字节偏移（增量取输出）。
         \\       --wait / --wait-timeout=      回读时服务端等待至多 N 秒直到有输出/终态。
@@ -122,6 +121,9 @@ pub const table = [_]Entry{
         \\       aiod-cli exec 'zig build -Doptimize=ReleaseFast' --cwd=/root/repo --timeout=600000
         \\       ID=$(aiod-cli async 'sleep 60'); aiod-cli exec --id=$ID --offset=0
         \\注意:  非 2xx 或 success=false → 打印 HTTP <码>: <message>，退出码非 0。
+        \\       退出码与上游 exit_code 一致：远端成功 0、失败 1-255 原样传递、
+        \\       硬超时（status=timed_out）124（同 timeout(1)）、被信号杀死（exit_code<0）1。
+        \\       非 0 时会在 stderr 补一行「（exit N）」，不污染 stdout 管道。
         ,
     },
     .{

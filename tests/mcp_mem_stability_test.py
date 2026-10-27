@@ -145,7 +145,8 @@ def run_single_stability_test(
                 print(f"  [ERROR] tools/call failed at iter {i}: {res['error']}")
                 return False
 
-            if i % step == 0:
+            if i % step == 0 or i == total_iters:
+                # 末轮必采：MEM_ITERS < step 时也至少有一个样本（否则下面 samples[0] 越界）
                 rss = get_vm_rss_kb(pid)
                 if rss < 0:
                     print("  [ERROR] 本机无法测量进程 RSS（既无 /proc/<pid>/status 也无 statm）；"
