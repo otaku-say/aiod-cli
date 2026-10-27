@@ -188,6 +188,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # 只取本工具自己的二进制：func job 会壳 ci-logs 成 artifact，
+          # 不限制 pattern 会把测试日志（*.txt）也发进 Release。
+          pattern: aiod-cli-*
 
       - name: 生成校验和
         run: |
