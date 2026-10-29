@@ -69,6 +69,27 @@ fn postJSON(c: *Ctx, path: []const u8, body: []const u8) !void {
 fn cmdCat(c: *Ctx, a: util.Args) !void {
     const path = a.at(0) orelse return error.MissingArg;
     const buf = try c.arena.alloc(u8, BUF);
+    // --exact：上游区间模式会把区间末行的行尾（\n 或 \r\n）吃掉，
+    // 需要逐字节精确时改为整文件读取 + 本地按行切片（受 BUF 限制，超大文件请用区间模式）
+    if (a.has("exact")) {
+        const res = try httpc.get(c.client, try c.url(try queryPath(c, "/v2/fs/read", path, a.get("user"))), try auth(c), buf);
+        try util.checkResp(c, res);
+        const parsed = std.json.parseFromSlice(std.json.Value, c.arena, res.body, .{}) catch {
+            try c.out.print("{s}", .{res.body});
+            return;
+        };
+        const content = dataString(parsed.value, "content") orelse "";
+        const start: usize = blk: {
+            const s = try util.intFlag(c, a, "start");
+            break :blk if (s) |x| (if (x > 0) @intCast(x) else 0) else 0;
+        };
+        const end: ?usize = blk: {
+            const e = try util.intFlag(c, a, "end");
+            break :blk if (e) |x| (if (x >= 0) @intCast(x) else null) else null;
+        };
+        try c.out.print("{s}", .{sliceLines(content, start, end)});
+        return;
+    }
     // start_line/end_line：行级截取（end_line 不含尾行）
     var w = std.Io.Writer.fixed(try c.arena.alloc(u8, 1024));
     try w.print("/v2/fs/read?path={s}", .{try urlEncode(c.arena, path)});
@@ -87,6 +108,30 @@ fn cmdCat(c: *Ctx, a: util.Args) !void {
     } else {
         try c.out.print("{s}\n", .{res.body});
     }
+}
+
+/// 按行切 content：[start, end) 区间的原始字节，每行连同自己的行尾一起返回。
+/// end 为 null 表示切到文件末尾；越界自动截断。
+fn sliceLines(content: []const u8, start: usize, end: ?usize) []const u8 {
+    if (end) |e| {
+        if (e == 0) return "";
+        if (e <= start) return "";
+    }
+    var idx: usize = 0;
+    var line: usize = 0;
+    var from: ?usize = null;
+    while (idx < content.len) {
+        const nl = std.mem.indexOfScalarPos(u8, content, idx, '\n');
+        const line_end = if (nl) |p| p + 1 else content.len;
+        if (line == start and from == null) from = idx;
+        if (end) |e| {
+            if (line + 1 >= e) return content[(from orelse idx)..line_end];
+        }
+        line += 1;
+        idx = line_end;
+    }
+    if (from) |f| return content[f..];
+    return "";
 }
 
 /// 取 data.<key> 的字符串值（aiod 统一响应包装）。

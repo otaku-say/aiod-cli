@@ -18,6 +18,9 @@ const sdk_exec = @import("sdk_exec.zig");
 
 const Ctx = ctxmod.Ctx;
 const BUF = 4 << 20;
+/// 未显式指定 --max-output 时的输出上限。服务端缺省只有 ~50KB，且超限是
+/// 「保留头尾、丢掉中段」的静默截断，普通使用者很难发现，这里顶到 256KB。
+const DEFAULT_MAX_OUTPUT: i64 = 262144;
 const BODY = 64 << 10;
 
 /// 命令/会话 id 会拼进 URL 路径（urlEncode 不转义 '.' 和 '/'）；
@@ -81,8 +84,10 @@ fn printOut(c: *Ctx, out: ?[]const u8, err: ?[]const u8) !void {
     if (out) |s| {
         if (s.len > 0) try c.out.print("{s}", .{s});
     }
+    // 远端 stderr 走本进程 stderr：否则 `cmd 2>file` 与管道分离全部失效，
+    // 调用方永远拿不到真实的错误流（历史实现把它并进了 stdout）。
     if (err) |s| {
-        if (s.len > 0) try c.out.print("{s}", .{s});
+        if (s.len > 0) try c.err.print("{s}", .{s});
     }
 }
 
@@ -147,7 +152,8 @@ fn runBody(c: *Ctx, a: util.Args, command: []const u8, mode: ?[]const u8) ![]con
     if (try util.intFlag(c, a, "timeout")) |v| try w.print(",\"timeout\":{d}", .{v});
     if (try util.intFlag(c, a, "hard-timeout")) |v| try w.print(",\"hard_timeout\":{d}", .{v});
     if (a.get("args")) |v| try w.print(",\"args\":{s}", .{v});
-    if (try util.intFlag(c, a, "max-output")) |v| try w.print(",\"max_output_length\":{d}", .{v});
+    const mo = try util.intFlag(c, a, "max-output");
+    try w.print(",\"max_output_length\":{d}", .{mo orelse DEFAULT_MAX_OUTPUT});
     try w.print("}}", .{});
     return w.buffered();
 }
@@ -185,6 +191,12 @@ fn cmdExecInner(c: *Ctx, a: util.Args) !void {
             try std.fmt.allocPrint(c.arena, "/v2/commands/{s}", .{id});
         const res = try httpc.get(c.client, try c.url(path), try auth(c), buf);
         try util.checkResp(c, res);
+        // --json：把响应体原样输出（含 status / offset / stderr_offset / exit_code），
+        // 供上层程序化轮询；否则只能靠人类可读文本猜任务状态
+        if (a.has("json")) {
+            try c.out.print("{s}\n", .{res.body});
+            return;
+        }
         const r = try emit(c, res.body);
         ctxmod.remoteExit(c, r.code, r.status);
         return;
@@ -226,6 +238,17 @@ fn emit(c: *Ctx, json: []const u8) !Remote {
     const v = parsed.value;
     try printOut(c, asStr(v, "stdout"), asStr(v, "stderr"));
     const code = asInt(v, "exit_code");
+    // 上游截断是静默的（头尾保留、中段丢弃）：用 offset（原始总字节）与返回长度对比，
+    // 把事实写到 stderr，调用方才能机器识别
+    if (asInt(v, "offset")) |total| {
+        const got: i64 = if (asStr(v, "stdout")) |s| @intCast(s.len) else 0;
+        if (total > got) {
+            try c.err.print(
+                "aiod-cli: warning: output truncated original_bytes={d} returned_bytes={d} (raise --max-output or redirect to a file)\n",
+                .{ total, got },
+            );
+        }
+    }
     // 提示走 stderr：不能污染 `OUT=$(aiod-cli exec …)` 这类管道
     if (code) |k| {
         if (k != 0) try c.err.print("（exit {d}）\n", .{k});

@@ -101,7 +101,7 @@ pub const table = [_]Entry{
         \\用法:  aiod-cli exec <命令> [参数…] [--cwd=<目录>] [--shell=<壳>] [--user=<用户>]
         \\                      [--session=<会话id>] [--env=K=V,K2=V2] [--timeout=<毫秒>]
         \\                      [--hard-timeout=<秒>] [--args='["a","b"]'] [--max-output=<字节>]
-        \\       aiod-cli exec --id=<command_id> [--offset=<字节>] [--stderr-offset=<字节>]
+        \\       aiod-cli exec --id=<command_id> [--json] [--offset=<字节>] [--stderr-offset=<字节>]
         \\                      [--wait] [--wait-timeout=<秒>]
         \\参数:  <命令> [参数…]  位置参数用空格拼成一条命令（不用自己转义引号）。
         \\       --cwd=        工作目录。
@@ -112,7 +112,7 @@ pub const table = [_]Entry{
         \\       --timeout=    毫秒；到点返回 status=running，进程还在跑（自己 kill）。
         \\       --hard-timeout=  秒；到点服务端强杀（返回 timed_out）。
         \\       --args=       JSON 数组；仅 shell=none 时合法（argv 形式运行）。
-        \\       --max-output= 截断输出上限。
+        \\       --max-output= 输出上限字节数（缺省 262144；超限会被上游「保留头尾、丢掉中段」，并在 stderr 打印 truncated warning）。
         \\       --id=         改成「按 id 回读」模式，不带位置参数。
         \\       --offset= / --stderr-offset=   回读时的字节偏移（增量取输出）。
         \\       --wait / --wait-timeout=      回读时服务端等待至多 N 秒直到有输出/终态。
@@ -232,10 +232,10 @@ pub const table = [_]Entry{
         .brief = "读沙箱内文件到标准输出",
         .detail =
         \\用途:  GET /v2/fs/read?path=…，取 data.content 原样打到 stdout。
-        \\用法:  aiod-cli cat <远端路径> [--start=<行>] [--end=<行>] [--user=<用户>]
+        \\用法:  aiod-cli cat <远端路径> [--start=<行>] [--end=<行>] [--user=<用户>] [--exact]
         \\       （`aiod-cli read ...` 是同义词）
         \\参数:  --user=   以指定用户身份读。
-        \\       --start= / --end=   行区间（0 起；end 不含尾行）。
+        \\       --start= / --end=   行区间（0 起；end 不含尾行；区间模式会吃掉末行行尾）；--exact 改为整文件读取+本地切片，行尾逐字节精确（文件需 ≤8MiB）。
         \\示例:  aiod-cli cat /etc/hostname
         \\       aiod-cli cat /tmp/data.csv --start=0 --end=10 > data.csv
         ,
